@@ -8,6 +8,8 @@
 
 ## 在其他电脑上使用
 
+下载最新版：[单文件 EXE](https://github.com/Starry-Frontier/camera-desk/releases/latest/download/CameraDesk-Standalone-Windows-x64.exe) · [便携压缩包](https://github.com/Starry-Frontier/camera-desk/releases/latest/download/CameraDesk-Windows-x64.zip) · [全部发行文件与源码](https://github.com/Starry-Frontier/camera-desk/releases/latest)。
+
 **单文件版：** 将 `CameraDesk-Standalone-Windows-x64.exe` 复制到 Windows 10/11 x64 电脑的可写文件夹，直接双击运行。Python、Qt 和编码组件均已整合，无需安装开发环境。首次启动会先将运行组件解包到系统临时目录，可能比便携文件夹版稍慢。
 
 **便携文件夹版：**

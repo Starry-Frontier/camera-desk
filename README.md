@@ -106,7 +106,7 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 
 ## GitHub 开源与发行
 
-把项目根目录上传为 GitHub 仓库即可。普通提交和 PR 会运行 Windows 测试；推送与当前版本号一致的 `v1.1.2` 等标签后，发行工作流会测试、构建两种可执行版本、打包应用及第三方源码、计算校验值，并创建草稿发行版供维护者检查。
+把项目根目录上传为 GitHub 仓库即可。普通提交和 PR 会运行 Windows 测试；推送与当前版本号一致的 `v1.1.3` 等标签后，发行工作流会测试、构建两种可执行版本、打包应用及第三方源码、计算校验值，并创建草稿发行版供维护者检查。
 
 完整步骤见 [发行指南](docs/RELEASING.md)，参与开发见 [CONTRIBUTING.md](CONTRIBUTING.md)。源码与便携包中不包含拍摄内容、个人设置或开发环境。
 

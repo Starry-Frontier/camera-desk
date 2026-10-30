@@ -1,0 +1,106 @@
+name: Build Windows release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          architecture: x64
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if ($env:RELEASE_TAG -notmatch '^v\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$') {
+            throw 'Use a version tag such as v1.0.0 or v1.0.1-rc.1.'
+          }
+          $version = (Get-Content multicam/__init__.py -Raw | Select-String '__version__ = "([^"]+)"').Matches.Groups[1].Value
+          if ($env:RELEASE_TAG -ne "v$version") { throw 'Tag does not match multicam.__version__.' }
+          if (-not (Test-Path "docs/RELEASE_NOTES_$env:RELEASE_TAG.md")) { throw 'Release notes missing.' }
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .\.venv\Scripts\python.exe -m pip install -r requirements-dev.txt
+      - name: Test
+        shell: pwsh
+        run: .\.venv\Scripts\python.exe -m pytest -q --basetemp test-output/pytest
+      - name: Build portable executable
+        shell: pwsh
+        run: .\build.ps1 -DistDirectory build/portable-dist
+      - name: Build standalone executable
+        shell: pwsh
+        run: .\build.ps1 -SingleFile -NoZip -DistDirectory build/standalone-dist
+      - name: Test the packaged executable
+        shell: pwsh
+        run: |
+          .\.venv\Scripts\python.exe scripts/verify-package.py --exe build/portable-dist/CameraDesk/CameraDesk.exe --work-dir "test-output/packaged-中文目录" --channels 8
+          if ($LASTEXITCODE -ne 0) { throw 'Default packaged test failed.' }
+          .\.venv\Scripts\python.exe scripts/verify-package.py --exe build/portable-dist/CameraDesk/CameraDesk.exe --work-dir "test-output/packaged-formats-中文目录" --formats
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged format and simultaneous photo test failed.' }
+          .\.venv\Scripts\python.exe scripts/verify-package.py --exe CameraDesk-Standalone-Windows-x64.exe --work-dir "test-output/standalone-中文目录" --channels 8
+          if ($LASTEXITCODE -ne 0) { throw 'Standalone multi-camera test failed.' }
+          .\.venv\Scripts\python.exe scripts/verify-package.py --exe CameraDesk-Standalone-Windows-x64.exe --work-dir "test-output/standalone-formats-中文目录" --formats
+          if ($LASTEXITCODE -ne 0) { throw 'Standalone format test failed.' }
+      - name: Package application source and third-party sources
+        shell: pwsh
+        run: |
+          .\scripts\package-source.ps1
+          .\scripts\fetch-third-party-sources.ps1 -BundleDirectory build/portable-dist/CameraDesk
+      - name: Write checksums
+        shell: pwsh
+        run: |
+          $assets = @('CameraDesk-Windows-x64.zip', 'CameraDesk-Standalone-Windows-x64.exe', 'CameraDesk-Source.zip', 'CameraDesk-ThirdParty-Sources.zip')
+          $lines = foreach ($asset in $assets) {
+            "{0}  {1}" -f (Get-FileHash -LiteralPath $asset -Algorithm SHA256).Hash.ToLowerInvariant(), $asset
+          }
+          $lines | Set-Content -LiteralPath SHA256SUMS.txt -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        with:
+          name: CameraDesk-Windows-x64
+          if-no-files-found: error
+          path: |
+            CameraDesk-Windows-x64.zip
+            CameraDesk-Standalone-Windows-x64.exe
+            CameraDesk-Source.zip
+            CameraDesk-ThirdParty-Sources.zip
+            SHA256SUMS.txt
+      - name: Create draft GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: pwsh
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          gh release view $env:RELEASE_TAG --json isDraft --jq .isDraft 2>$null | Tee-Object -Variable isDraft | Out-Null
+          if ($LASTEXITCODE -eq 0) {
+            if ($isDraft -ne 'true') { throw 'Refusing to overwrite an already published release.' }
+            gh release upload $env:RELEASE_TAG CameraDesk-Windows-x64.zip CameraDesk-Standalone-Windows-x64.exe CameraDesk-Source.zip CameraDesk-ThirdParty-Sources.zip SHA256SUMS.txt --clobber
+          } else {
+            gh release create $env:RELEASE_TAG CameraDesk-Windows-x64.zip CameraDesk-Standalone-Windows-x64.exe CameraDesk-Source.zip CameraDesk-ThirdParty-Sources.zip SHA256SUMS.txt --draft --verify-tag --title "Camera Desk $env:RELEASE_TAG" --notes-file "docs/RELEASE_NOTES_$env:RELEASE_TAG.md"
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'GitHub release upload failed.' }
+

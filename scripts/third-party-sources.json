@@ -1,0 +1,88 @@
+[
+  {
+    "component": "Qt base (Core, Gui, Network, Widgets and platform plugins)",
+    "version": "6.6.3",
+    "filename": "qtbase-everywhere-src-6.6.3.tar.xz",
+    "url": "https://download.qt.io/archive/qt/6.6/6.6.3/submodules/qtbase-everywhere-src-6.6.3.tar.xz",
+    "sha256": "0493fd0b380c4edf8872f011a7f26d245aa4cdd75b349904ef340a22dedf7462",
+    "verification": "Official Qt .mirrorlist SHA-256 metadata"
+  },
+  {
+    "component": "Qt SVG",
+    "version": "6.6.3",
+    "filename": "qtsvg-everywhere-src-6.6.3.tar.xz",
+    "url": "https://download.qt.io/archive/qt/6.6/6.6.3/submodules/qtsvg-everywhere-src-6.6.3.tar.xz",
+    "sha256": "4acb1e576eca55e955cf2b0d15c914a200df290e737accd7c1901fa1e33a25c7",
+    "verification": "Official Qt .mirrorlist SHA-256 metadata"
+  },
+  {
+    "component": "Qt image format plugins",
+    "version": "6.6.3",
+    "filename": "qtimageformats-everywhere-src-6.6.3.tar.xz",
+    "url": "https://download.qt.io/archive/qt/6.6/6.6.3/submodules/qtimageformats-everywhere-src-6.6.3.tar.xz",
+    "sha256": "3ca5ea60176603ce6ffc1bff59a4dcea139375233ce8e5e86c38f4e84c44627c",
+    "verification": "Official Qt .mirrorlist SHA-256 metadata"
+  },
+  {
+    "component": "PySide6 and Shiboken6",
+    "version": "6.6.3.1",
+    "filename": "pyside-setup-5cad7f595f4cd7faa6e45a2ddf82f3bb14ab9140.tar.gz",
+    "url": "https://codeload.github.com/qtproject/pyside-pyside-setup/tar.gz/5cad7f595f4cd7faa6e45a2ddf82f3bb14ab9140",
+    "sha256": "250d31f0078b55d7b4b23680202d9c6c73de69fae96a958b4cecf4adbf934bf1",
+    "verification": "Downloaded official Qt GitHub mirror archive; commit matches code.qt.io branch 6.6.3.1 via git ls-remote, downloaded 2026-10-30"
+  },
+  {
+    "component": "OpenCV FFmpeg corresponding sources and build inputs",
+    "version": "ffmpeg/4.x_20240522_src",
+    "filename": "opencv-ffmpeg/aom-src-v3.9.0.tar.xz",
+    "url": "https://raw.githubusercontent.com/opencv/opencv_3rdparty/d35ed9aaa15fa2e638e68d22bfc980ea157d88bc/sources/build/aom/aom-src-v3.9.0.tar.xz",
+    "sha256": "674aa4e992c6f5517ac88f927c461fa775c0ec6b5fed9c24e61d3a2cd97528b9",
+    "git_blob": "ae28442c51492173d01e388de67bb39ba689c595",
+    "verification": "Downloaded official OpenCV source archive and verified Git blob SHA-1 against immutable source tree"
+  },
+  {
+    "component": "OpenCV FFmpeg corresponding sources and build inputs",
+    "version": "ffmpeg/4.x_20240522_src",
+    "filename": "opencv-ffmpeg/ffmpeg-src-n4.4.4.tar.xz",
+    "url": "https://raw.githubusercontent.com/opencv/opencv_3rdparty/d35ed9aaa15fa2e638e68d22bfc980ea157d88bc/sources/build/ffmpeg/ffmpeg-src-n4.4.4.tar.xz",
+    "sha256": "20a10677d67f8e524e5159c860e1a36333d40b60a8c1a83c9890e536832b6818",
+    "git_blob": "289015269fbc541a0a8ee3afaa48b4654447e26a",
+    "verification": "Downloaded official OpenCV source archive and verified Git blob SHA-1 against immutable source tree"
+  },
+  {
+    "component": "OpenCV FFmpeg corresponding sources and build inputs",
+    "version": "ffmpeg/4.x_20240522_src",
+    "filename": "opencv-ffmpeg/libvpx-src-v1.14.0.tar.xz",
+    "url": "https://raw.githubusercontent.com/opencv/opencv_3rdparty/d35ed9aaa15fa2e638e68d22bfc980ea157d88bc/sources/build/libvpx/libvpx-src-v1.14.0.tar.xz",
+    "sha256": "4cb354c566f324af1b0264475cb1a3b4ffefc93199869e0f080f47a8bac17976",
+    "git_blob": "62075f4c59d1c0422611d9d4e292dc00df7bbadd",
+    "verification": "Downloaded official OpenCV source archive and verified Git blob SHA-1 against immutable source tree"
+  },
+  {
+    "component": "OpenCV FFmpeg corresponding sources and build inputs",
+    "version": "ffmpeg/4.x_20240522_src",
+    "filename": "opencv-ffmpeg/openh264-api-headers-v1.8.0.tar.xz",
+    "url": "https://raw.githubusercontent.com/opencv/opencv_3rdparty/d35ed9aaa15fa2e638e68d22bfc980ea157d88bc/sources/build/openh264/openh264-api-headers-v1.8.0.tar.xz",
+    "sha256": "90c9333fe8dd9ce8f6585b7a2dae595276338f42b2850dbe2a75218e2957d1db",
+    "git_blob": "5c44920eff87e8b856864c67e8cf573d556613a1",
+    "verification": "Downloaded official OpenCV source archive and verified Git blob SHA-1 against immutable source tree"
+  },
+  {
+    "component": "OpenCV FFmpeg corresponding sources and build inputs",
+    "version": "ffmpeg/4.x_20240522_src",
+    "filename": "opencv-ffmpeg/opencv-videoio-ffmpeg.tar.xz",
+    "url": "https://raw.githubusercontent.com/opencv/opencv_3rdparty/d35ed9aaa15fa2e638e68d22bfc980ea157d88bc/sources/opencv/opencv-videoio-ffmpeg.tar.xz",
+    "sha256": "70b11035ec264811bc6502b110e5b37c55d3d9c72a61d31821eeb12e9a585927",
+    "git_blob": "b9fa99c3d4332cbd1e3d7e6b367a21d4dac56ffc",
+    "verification": "Downloaded official OpenCV source archive and verified Git blob SHA-1 against immutable source tree"
+  },
+  {
+    "component": "OpenCV FFmpeg corresponding sources and build inputs",
+    "version": "ffmpeg/4.x_20240522_src",
+    "filename": "opencv-ffmpeg/opencv_ffmpeg.tar.xz",
+    "url": "https://raw.githubusercontent.com/opencv/opencv_3rdparty/d35ed9aaa15fa2e638e68d22bfc980ea157d88bc/sources/opencv_ffmpeg.tar.xz",
+    "sha256": "bfc957c9e53086410bdcec8db406951d1d362556aca805b8b732dea6c2d69abc",
+    "git_blob": "9ab753b31048e4587f91cfa614acb95992fcea43",
+    "verification": "Downloaded official OpenCV source archive and verified Git blob SHA-1 against immutable source tree"
+  }
+]

@@ -68,6 +68,8 @@ def main():
     if args.timers:
         assert runtime.get('timed_capture') and runtime.get('demo_zoom_disabled') and runtime.get('storage_estimate_visible')
         assert runtime.get('photo_start_time_selectable'), 'Packaged photo date/time selectors failed'
+        assert runtime.get('photo_interval_selectable'), 'Packaged photo interval input/buttons failed'
+        assert runtime.get('photo_interval_live_update'), 'Packaged single/all live photo interval edits failed'
         assert args.channels * 2 <= len(photos) <= args.channels * 4
     else:
         assert len(photos) == (5 if args.formats else args.channels), 'Photo output was not completed'
@@ -103,7 +105,8 @@ def main():
               'version': runtime['version'], 'channels': args.channels, 'qt_platform': args.platform,
               'core_modules_and_runtime_libraries_loaded_from_bundle': True, 'frozen': True,
               'clean_environment': True, 'unicode_data_directory': str(work), 'multi_format_recording_with_photos': args.formats,
-              'scheduled_auto_stop_and_interval_photos': args.timers}
+              'scheduled_auto_stop_and_interval_photos': args.timers,
+              'photo_interval_input_and_live_updates': bool(args.timers and runtime.get('photo_interval_live_update'))}
     (work / 'verification-result.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     print(json.dumps(report, ensure_ascii=True))
 

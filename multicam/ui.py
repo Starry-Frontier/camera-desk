@@ -26,7 +26,7 @@ from .save_dialog import BatchSaveDialog
 from .saving import SaveTarget, media_path, path_identity, validate_targets
 from .media_formats import change_suffix, format_for_extension, format_for_filter, formats_for
 from .widgets import SelectionComboBox as QComboBox, NumberBox as QSpinBox, DurationEdit
-from .timer_dialog import TimerDialog
+from .timer_dialog import TimerDialog, PhotoIntervalDialog
 
 
 STYLE = """
@@ -179,6 +179,7 @@ class CameraTile(QFrame):
     record = Signal()
     remove = Signal()
     timer_requested = Signal()
+    interval_requested = Signal()
     zoom_requested = Signal(int)
 
     def __init__(self, number, name):
@@ -197,6 +198,9 @@ class CameraTile(QFrame):
         head.addWidget(self.title, 1)
         self.timer_btn = button('定时', self.timer_requested.emit)
         head.addWidget(self.timer_btn)
+        self.interval_btn = button('间隔', self.interval_requested.emit)
+        self.interval_btn.setEnabled(False)
+        head.addWidget(self.interval_btn)
         self.close_btn = button('×', self.remove.emit)
         self.close_btn.setFixedSize(27, 27)
         self.close_btn.setStyleSheet('padding: 0; font-size: 18px;')
@@ -393,6 +397,8 @@ class MainWindow(QMainWindow):
         sidebar.addWidget(self.layout_combo)
         sidebar.addWidget(label('点击画面，调整该机位的参数。', 'muted', True))
         sidebar.addWidget(button('定时拍摄 / 存储预估…', lambda: self.timer_dialog()))
+        self.edit_intervals_btn = button('调整拍照间隔…', lambda: self.photo_interval_dialog())
+        sidebar.addWidget(self.edit_intervals_btn)
         self.plans_label = label('暂无预约或间隔拍照任务', 'muted', True)
         sidebar.addWidget(self.plans_label)
         self.cancel_plans_btn = button('取消定时任务', self.cancel_capture_plans)
@@ -610,6 +616,7 @@ class MainWindow(QMainWindow):
         tile.record.connect(lambda: self.toggle_record(key))
         tile.remove.connect(lambda: self.remove_camera(key))
         tile.timer_requested.connect(lambda: self.timer_for_camera(key))
+        tile.interval_requested.connect(lambda: self.photo_interval_dialog(key))
         tile.zoom_requested.connect(lambda value: worker.set_hardware('zoom', value))
         # A removed camera may have queued signals when its index is reused.
         def guarded(callback):
@@ -656,7 +663,9 @@ class MainWindow(QMainWindow):
         if s.schedule:
             text += ' · 预约 ' + datetime.fromtimestamp(s.schedule['starts_at']).strftime('%H:%M:%S')
         if s.photo_plan:
-            text += ' · 间隔拍照中'
+            text += ' · 每 %g 秒拍照' % s.photo_plan['interval']
+        elif s.schedule and s.schedule['kind'] == 'photo':
+            text += ' · 间隔 %g 秒' % s.schedule['interval']
         s.tile.info.setText(text)
         if self.selected == key:
             self.actual_label.setText(self.format_description(stats))
@@ -696,6 +705,45 @@ class MainWindow(QMainWindow):
             self.notify('%s：已取消此机位的预约或间隔拍照，录像可继续。' % s.device.name)
         else:
             self.timer_dialog(key)
+
+    @staticmethod
+    def photo_capture_plan(session):
+        return session.photo_plan or (session.schedule if session.schedule and session.schedule['kind'] == 'photo' else None)
+
+    def photo_interval_dialog(self, key=None):
+        sessions = [s for s in self.sessions.values() if self.photo_capture_plan(s)]
+        if not sessions or (key is not None and not any(s.key == key for s in sessions)):
+            self.notify('暂无可调整的拍照任务，请先创建间隔拍照任务。')
+            return
+        dialog = PhotoIntervalDialog(sessions, key, self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            self.set_photo_interval(**dialog.plan)
+        except ValueError as exc:
+            QMessageBox.warning(self, '无法调整拍照间隔', str(exc))
+
+    def set_photo_interval(self, keys, interval):
+        keys = list(dict.fromkeys(keys))
+        interval = float(interval)
+        if not keys or not math.isfinite(interval) or not .1 <= interval <= 86400:
+            raise ValueError('请选择拍照任务，间隔须为 0.1～86400 秒。')
+        now = time.monotonic()
+        chosen = []
+        for key in keys:
+            s = self.sessions.get(key)
+            plan = self.photo_capture_plan(s) if s else None
+            if (not plan or not self._can_save(s) or not s.worker.isRunning()
+                    or (s.photo_plan is plan and now >= plan['end'])):
+                raise ValueError('所选拍照任务已结束、已取消或机位不可用，请重新选择。')
+            chosen.append((s, plan))
+        # Validate the complete selection before changing any task.
+        for s, plan in chosen:
+            plan['interval'] = interval
+            if s.photo_plan is plan:
+                plan['next'] = now + interval
+        self.tick_capture_plans()
+        self.notify('已将 %d 路拍照间隔改为 %g 秒；原结束时间不变，录像继续。' % (len(chosen), interval))
 
     def create_capture_plan(self, keys, kind, starts_at, duration, interval=5):
         keys = list(dict.fromkeys(keys))
@@ -1202,11 +1250,16 @@ class MainWindow(QMainWindow):
         self.all_record.setEnabled(idle)
         self.all_record.setText('● 开始其余机位' if idle and busy else '● 全部开始录像')
         self.all_stop.setEnabled(can_stop or any(s.schedule or s.photo_plan for s in self.sessions.values()))
+        self.edit_intervals_btn.setEnabled(any(self.photo_capture_plan(s) for s in self.sessions.values()))
         count = sum(s.recording for s in self.sessions.values())
         self.count_label.setText('%d 个机位%s' % (len(self.sessions), ' · %d 路录像' % count if count else ''))
         for s in self.sessions.values():
             s.tile.photo_btn.setEnabled(s.ready and not s.removing and not s.format_pending)
             s.tile.timer_btn.setText('取消定时' if s.schedule or s.photo_plan else '定时')
+            photo_plan = self.photo_capture_plan(s)
+            s.tile.interval_btn.setEnabled(bool(photo_plan) and not s.removing)
+            s.tile.interval_btn.setToolTip('当前每 %g 秒拍照，点击调整此机位间隔。' % photo_plan['interval']
+                                         if photo_plan else '创建间隔拍照任务后，可在这里调整间隔。')
             if s.schedule and s.schedule['kind'] == 'video' and not s.recording:
                 s.tile.rec_btn.setText('取消预约')
                 s.tile.rec_btn.setEnabled(True)

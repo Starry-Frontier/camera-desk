@@ -98,11 +98,19 @@ def schedule_smoke_test(window, data, formats=False, channels=2, timers=False):
             QTimer.singleShot(100, begin)
             return
         if timers:
-            from .timer_dialog import TimerDialog
+            from .timer_dialog import TimerDialog, PhotoIntervalDialog
             dialog = TimerDialog(list(window.sessions.values()), None, window.output_dir, window.media_formats, window)
-            dialog.kind.setCurrentIndex(1)
             dialog.show()
             QApplication.processEvents()
+            enabled_initially = dialog.interval.isEnabled() and not dialog.interval.isReadOnly()
+            dialog.interval_editor.plus.click()
+            plus_worked = dialog.interval.value() == 5.1 and dialog.kind.currentData() == 'photo'
+            dialog.kind.setCurrentIndex(0)
+            dialog.interval_editor.minus.click()
+            evidence['photo_interval_selectable'] = (enabled_initially and plus_worked
+                and dialog.interval.value() == 5 and dialog.kind.currentData() == 'photo')
+            dialog.interval.setValue(.6)
+            selected_interval = dialog.interval.value()
             editable = dialog.start_at.isEnabled() and all(box.isEnabled() for box in dialog.start_at.parts)
             selected_time = QDateTime.currentDateTime().addDays(1)
             selected_time.setTime(QTime(18, 32, 10))
@@ -121,7 +129,24 @@ def schedule_smoke_test(window, data, formats=False, channels=2, timers=False):
                 if not all(s.recording for s in window.sessions.values()):
                     QTimer.singleShot(100, interval_photos)
                     return
-                window.create_capture_plan(list(window.sessions), 'photo', time.time(), 1.8, .6)
+                window.create_capture_plan(list(window.sessions), 'photo', time.time(), 1.8, selected_interval)
+                sessions = list(window.sessions.values())
+                ends = [s.photo_plan['end'] for s in sessions]
+                window.set_photo_interval([sessions[0].key], .3)
+                single_worked = (sessions[0].photo_plan['interval'] == .3 and
+                    all(s.photo_plan['interval'] == selected_interval for s in sessions[1:]))
+                editor = PhotoIntervalDialog(sessions, parent=window)
+                editor.show()
+                QApplication.processEvents()
+                editor.interval_editor.plus.click()
+                editor.interval_editor.minus.click()
+                editor.interval.setValue(selected_interval)
+                editor.grab().save(str(data / 'interval-preview.png'))
+                editor.accept()
+                window.set_photo_interval(**editor.plan)
+                evidence['photo_interval_live_update'] = (single_worked and
+                    all(s.photo_plan['interval'] == selected_interval and s.photo_plan['end'] == end
+                        and s.recording for s, end in zip(sessions, ends)))
             def finish_when_stopped():
                 if any(s.recording or s.pending_record or s.schedule or s.photo_plan for s in window.sessions.values()):
                     QTimer.singleShot(100, finish_when_stopped)

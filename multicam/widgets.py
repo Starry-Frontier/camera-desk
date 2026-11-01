@@ -1,7 +1,7 @@
 """Visible selection and stepping controls, including in styled Windows builds."""
 from PySide6.QtCore import QPoint, Qt, QDateTime, QTime, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit, QDateEdit, QWidget, QHBoxLayout, QVBoxLayout, QSizePolicy
+from PySide6.QtWidgets import QComboBox, QSpinBox, QDoubleSpinBox, QAbstractSpinBox, QDateTimeEdit, QDateEdit, QWidget, QHBoxLayout, QVBoxLayout, QSizePolicy, QPushButton
 
 
 def selection_arrow(widget):
@@ -56,6 +56,37 @@ class NumberBox(StepButtons, QSpinBox):
 
 class DecimalBox(StepButtons, QDoubleSpinBox):
     pass
+
+
+class PhotoIntervalEdit(QWidget):
+    """An editable seconds field with separate, unambiguous step buttons."""
+    def __init__(self, value=5, parent=None):
+        super().__init__(parent)
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(5)
+        self.spin = QDoubleSpinBox()
+        self.spin.setRange(.1, 86400)
+        self.spin.setDecimals(1)
+        self.spin.setSingleStep(.1)
+        self.spin.setButtonSymbols(QAbstractSpinBox.NoButtons)
+        self.spin.setKeyboardTracking(False)
+        self.spin.setSuffix(' 秒 / 张')
+        self.spin.setValue(value)
+        self.spin.setAccessibleName('拍照间隔（秒）')
+        self.spin.setToolTip('直接输入每张照片之间的秒数，范围 0.1～86400 秒。')
+        row.addWidget(self.spin, 1)
+        self.minus = QPushButton('−')
+        self.plus = QPushButton('+')
+        for widget, name in ((self.minus, '减少拍照间隔'), (self.plus, '增加拍照间隔')):
+            widget.setFixedWidth(38)
+            widget.setAutoDefault(False)
+            widget.setAccessibleName(name)
+            widget.setToolTip(name + '（每次 0.1 秒）')
+            row.addWidget(widget)
+        self.minus.clicked.connect(self.spin.stepDown)
+        self.plus.clicked.connect(self.spin.stepUp)
+        self.setFocusProxy(self.spin)
 
 
 class DateTimePicker(QWidget):

@@ -3,7 +3,7 @@ import time
 from PySide6.QtCore import QDateTime
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFormLayout, QLabel,
                               QVBoxLayout, QMessageBox)
-from .widgets import SelectionComboBox, DateTimePicker, DurationEdit, DecimalBox
+from .widgets import SelectionComboBox, DateTimePicker, DurationEdit, PhotoIntervalEdit
 from .storage import estimate_storage, format_bytes, free_space
 
 
@@ -37,13 +37,12 @@ class TimerDialog(QDialog):
         form.addRow('', self.start_hint)
         self.duration = DurationEdit(60)
         form.addRow('拍摄持续时间', self.duration)
-        self.interval = DecimalBox()
-        self.interval.setRange(.1, 86400)
-        self.interval.setDecimals(1)
-        self.interval.setValue(5)
-        self.interval.setSuffix(' 秒 / 张')
-        self.interval.setEnabled(False)
-        form.addRow('拍照间隔', self.interval)
+        self.interval_editor = PhotoIntervalEdit()
+        self.interval = self.interval_editor.spin
+        form.addRow('拍照间隔', self.interval_editor)
+        self.interval_hint = QLabel()
+        self.interval_hint.setWordWrap(True)
+        form.addRow('', self.interval_hint)
         layout.addLayout(form)
         self.estimate = QLabel()
         self.estimate.setWordWrap(True)
@@ -65,7 +64,7 @@ class TimerDialog(QDialog):
         self.start_at.dateTimeChanged.connect(self.schedule_time_edited)
         for box in self.duration.parts:
             box.valueChanged.connect(self.update_estimate)
-        self.interval.valueChanged.connect(self.update_estimate)
+        self.interval.valueChanged.connect(self.photo_interval_edited)
         self.update_estimate()
 
     def chosen(self):
@@ -76,9 +75,14 @@ class TimerDialog(QDialog):
         self.start_mode.setCurrentIndex(1)
         self.update_estimate()
 
+    def photo_interval_edited(self, *_):
+        self.kind.setCurrentIndex(1)
+        self.update_estimate()
+
     def update_estimate(self, *_):
         photo = self.kind.currentData() == 'photo'
-        self.interval.setEnabled(photo)
+        self.interval_hint.setText('按此间隔拍照；任务开始后仍可在主界面调整。' if photo
+                                   else '修改拍照间隔将自动选择“间隔自动拍照”。')
         self.start_hint.setText('已选择预约：按所选日期和时、分、秒开始拍摄。' if self.start_mode.currentIndex() == 1
                                 else '当前为立即开始；修改上方日期或时、分、秒，将自动切换为预约。')
         suffix = self.formats['photo' if photo else 'video']
@@ -92,6 +96,7 @@ class TimerDialog(QDialog):
         self.estimate.setStyleSheet('color: #a83e37;' if available is not None and result['maximum_bytes'] > available else '')
 
     def accept(self):
+        self.interval.interpretText()
         duration = self.duration.value()
         starts_at = self.start_at.dateTime().toMSecsSinceEpoch() / 1000 if self.start_mode.currentIndex() else time.time()
         if duration <= 0 or not self.chosen() or (self.start_mode.currentIndex() and starts_at <= time.time()):
@@ -99,4 +104,61 @@ class TimerDialog(QDialog):
             return
         self.plan = {'keys': [s.key for s in self.chosen()], 'kind': self.kind.currentData(),
                      'starts_at': starts_at, 'duration': duration, 'interval': self.interval.value()}
+        super().accept()
+
+
+class PhotoIntervalDialog(QDialog):
+    """Change existing photo tasks without recreating or extending them."""
+    def __init__(self, sessions, selected=None, parent=None):
+        super().__init__(parent)
+        self.sessions = list(sessions)
+        self.plan = None
+        self.setWindowTitle('调整拍照间隔')
+        self.setMinimumWidth(480)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.scope = SelectionComboBox()
+        self.scope.addItem('全部拍照任务', None)
+        for s in self.sessions:
+            self.scope.addItem('%02d · %s' % (s.number, s.device.name), s.key)
+        if selected is not None:
+            self.scope.setCurrentIndex(self.scope.findData(selected))
+        form.addRow('应用到', self.scope)
+        self.interval_editor = PhotoIntervalEdit()
+        self.interval = self.interval_editor.spin
+        form.addRow('新的拍照间隔', self.interval_editor)
+        layout.addLayout(form)
+        self.current = QLabel()
+        self.current.setWordWrap(True)
+        layout.addWidget(self.current)
+        hint = QLabel('运行中的任务从应用时刻重新计时，在新间隔后拍下一张；原定结束时间不变。\n'
+                      '预约任务从原定开始时间使用新间隔。保存位置、图片格式和正在录制的视频保持原设置。')
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        self.buttons.button(QDialogButtonBox.Ok).setText('应用间隔')
+        self.buttons.button(QDialogButtonBox.Cancel).setText('取消')
+        self.buttons.accepted.connect(self.accept)
+        self.buttons.rejected.connect(self.reject)
+        layout.addWidget(self.buttons)
+        self.scope.currentIndexChanged.connect(self.load_current)
+        self.load_current()
+
+    def chosen(self):
+        key = self.scope.currentData()
+        return [s for s in self.sessions if key is None or s.key == key]
+
+    def load_current(self, *_):
+        plans = [(s, s.photo_plan or (s.schedule if s.schedule and s.schedule['kind'] == 'photo' else None))
+                 for s in self.chosen()]
+        plans = [(s, p) for s, p in plans if p]
+        if plans:
+            self.interval.setValue(plans[0][1]['interval'])
+        self.current.setText('当前间隔：\n' + '\n'.join('%02d · %g 秒 / 张（%s）' %
+            (s.number, p['interval'], '进行中' if s.photo_plan is p else '已预约') for s, p in plans)
+            if plans else '所选拍照任务已结束。')
+
+    def accept(self):
+        self.interval.interpretText()
+        self.plan = {'keys': [s.key for s in self.chosen()], 'interval': self.interval.value()}
         super().accept()

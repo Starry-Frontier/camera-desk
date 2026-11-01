@@ -29,7 +29,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\fetch-third-party-sources.ps1
 
 1. 核对 `multicam/__init__.py` 的版本、`CHANGELOG.md` 及 `docs/RELEASE_NOTES_v版本.md`。
 2. 在 GitHub 建立仓库并推送源码。
-3. 创建并推送对应标签，例如当前版本的 `v1.2.1`。
+3. 创建并推送对应标签，例如当前版本的 `v1.2.2`。
 4. `Build Windows release` 会测试、打包，上传构建产物，并创建草稿发行版。
 5. 检查草稿中的便携包、应用源码、第三方源码、校验值和说明；在第二台 Windows 电脑测试后，再在 GitHub 点击发布。
 

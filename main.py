@@ -14,6 +14,7 @@ def main():
     parser.add_argument('--data-dir', type=Path, help='Settings and default capture folder')
     parser.add_argument('--smoke-test', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--smoke-test-formats', action='store_true', help=argparse.SUPPRESS)
+    parser.add_argument('--smoke-test-timers', action='store_true', help=argparse.SUPPRESS)
     args = parser.parse_args()
     base = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).resolve().parent
     data = args.data_dir or base / 'data'
@@ -41,12 +42,12 @@ def main():
         logging.error('Unhandled application error', exc_info=(kind, value, traceback))
         QMessageBox.critical(None, 'Camera Desk', '操作未能完成：%s\n详细信息已写入 camera-desk.log。' % value)
     sys.excepthook = exception_hook
-    window = MainWindow(data, demo=args.demo or args.smoke_test or args.smoke_test_formats,
+    window = MainWindow(data, demo=args.demo or args.smoke_test or args.smoke_test_formats or args.smoke_test_timers,
                         demo_count=args.demo_count)
     window.show()
-    if args.smoke_test or args.smoke_test_formats:
+    if args.smoke_test or args.smoke_test_formats or args.smoke_test_timers:
         from multicam.smoke import schedule_smoke_test
-        schedule_smoke_test(window, data, formats=args.smoke_test_formats, channels=args.demo_count)
+        schedule_smoke_test(window, data, formats=args.smoke_test_formats, channels=args.demo_count, timers=args.smoke_test_timers)
     return app.exec()
 
 

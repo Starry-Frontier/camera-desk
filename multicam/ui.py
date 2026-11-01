@@ -4,6 +4,7 @@ import json
 import logging
 import math
 import re
+import time
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,8 @@ from . import __version__
 from .save_dialog import BatchSaveDialog
 from .saving import SaveTarget, media_path, path_identity, validate_targets
 from .media_formats import change_suffix, format_for_extension, format_for_filter, formats_for
+from .widgets import SelectionComboBox as QComboBox, NumberBox as QSpinBox, DurationEdit
+from .timer_dialog import TimerDialog
 
 
 STYLE = """
@@ -51,8 +54,14 @@ QToolButton::menu-button { width: 17px; border-left: 1px solid #dbe2dc; }
 QMenu { background: #ffffff; border: 1px solid #dbe2dc; padding: 5px; }
 QMenu::item { padding: 7px 16px; }
 QMenu::item:selected { background: #edf3ee; }
-QComboBox, QSpinBox, QLineEdit { background: #fafbf9; border: 1px solid #dbe2dc; border-radius: 6px; padding: 6px; min-height: 20px; }
-QComboBox::drop-down { border: none; width: 20px; }
+QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit, QLineEdit { background: #fafbf9; border: 1px solid #dbe2dc; border-radius: 6px; padding: 6px; min-height: 20px; }
+QComboBox, QDateTimeEdit { padding-right: 32px; }
+QComboBox::drop-down, QDateTimeEdit::drop-down { border-left: 1px solid #c6d0c7; width: 28px; background: #e6f0e7; border-top-right-radius: 6px; border-bottom-right-radius: 6px; }
+QComboBox::down-arrow, QDateTimeEdit::down-arrow { image: none; }
+QSpinBox, QDoubleSpinBox { padding-right: 4px; }
+QSpinBox::up-button, QDoubleSpinBox::up-button { width: 20px; background: #e6f0e7; border-left: 1px solid #c6d0c7; }
+QSpinBox::down-button, QDoubleSpinBox::down-button { width: 20px; background: #e6f0e7; border-left: 1px solid #c6d0c7; }
+QSpinBox::up-arrow, QSpinBox::down-arrow, QDoubleSpinBox::up-arrow, QDoubleSpinBox::down-arrow { image: none; }
 QComboBox QAbstractItemView { background: white; selection-background-color: #dcebdd; color: #24322e; }
 QCheckBox { spacing: 7px; padding: 4px 0; }
 QCheckBox::indicator { width: 16px; height: 16px; }
@@ -169,6 +178,8 @@ class CameraTile(QFrame):
     snapshot_save_as = Signal()
     record = Signal()
     remove = Signal()
+    timer_requested = Signal()
+    zoom_requested = Signal(int)
 
     def __init__(self, number, name):
         super().__init__()
@@ -184,6 +195,8 @@ class CameraTile(QFrame):
         self.title.setMinimumWidth(0)
         self.title.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         head.addWidget(self.title, 1)
+        self.timer_btn = button('定时', self.timer_requested.emit)
+        head.addWidget(self.timer_btn)
         self.close_btn = button('×', self.remove.emit)
         self.close_btn.setFixedSize(27, 27)
         self.close_btn.setStyleSheet('padding: 0; font-size: 18px;')
@@ -204,6 +217,32 @@ class CameraTile(QFrame):
         footer.addWidget(self.photo_btn)
         footer.addWidget(self.rec_btn)
         layout.addLayout(footer)
+        zoom_row = QHBoxLayout()
+        zoom_row.addWidget(label('硬件变焦', 'muted'))
+        self.zoom_value = QSpinBox()
+        self.zoom_value.setAccessibleName('此机位硬件变焦值')
+        self.zoom_apply = button('应用', lambda: self.zoom_requested.emit(self.zoom_value.value()))
+        self.zoom_value.setEnabled(False)
+        self.zoom_apply.setEnabled(False)
+        zoom_row.addWidget(self.zoom_value, 1)
+        zoom_row.addWidget(self.zoom_apply)
+        layout.addLayout(zoom_row)
+        self.zoom_hint = label('正在读取设备变焦能力…', 'muted', True)
+        layout.addWidget(self.zoom_hint)
+
+    def set_zoom(self, caps):
+        supported = bool(caps.get('supported'))
+        self.zoom_value.setEnabled(supported)
+        self.zoom_apply.setEnabled(supported)
+        if supported:
+            self.zoom_value.setRange(caps['minimum'], caps['maximum'])
+            self.zoom_value.setSingleStep(caps['step'])
+            value = caps.get('current')
+            self.zoom_value.setValue(value if value is not None else caps['default'])
+            self.zoom_hint.setText('设备值 %d～%d · 步长 %d%s' % (caps['minimum'], caps['maximum'], caps['step'],
+                                      ' · 当前值未知' if value is None else ''))
+        else:
+            self.zoom_hint.setText(caps.get('reason', '设备不支持硬件变焦'))
 
     def mousePressEvent(self, event):
         self.selected_signal.emit()
@@ -230,6 +269,9 @@ class CameraSession:
         self.format_pending = False
         self.draft = CameraConfig(**asdict(config))
         self.modes = []
+        self.zoom_caps = {'supported': False}
+        self.schedule = None
+        self.photo_plan = None
 
 
 class MainWindow(QMainWindow):
@@ -270,6 +312,11 @@ class MainWindow(QMainWindow):
         self.close_timer = QTimer(self)
         self.close_timer.setInterval(100)
         self.close_timer.timeout.connect(self._finish_close)
+        self.capture_timer = QTimer(self)
+        self.capture_timer.setTimerType(Qt.PreciseTimer)
+        self.capture_timer.setInterval(100)
+        self.capture_timer.timeout.connect(self.tick_capture_plans)
+        self.capture_timer.start()
         QTimer.singleShot(0, self.refresh_devices)
         if demo:
             QTimer.singleShot(150, lambda: self.add_demo_cameras(demo_count))
@@ -345,6 +392,12 @@ class MainWindow(QMainWindow):
         self.layout_combo.currentIndexChanged.connect(self.relayout)
         sidebar.addWidget(self.layout_combo)
         sidebar.addWidget(label('点击画面，调整该机位的参数。', 'muted', True))
+        sidebar.addWidget(button('定时拍摄 / 存储预估…', lambda: self.timer_dialog()))
+        self.plans_label = label('暂无预约或间隔拍照任务', 'muted', True)
+        sidebar.addWidget(self.plans_label)
+        self.cancel_plans_btn = button('取消定时任务', self.cancel_capture_plans)
+        self.cancel_plans_btn.setToolTip('取消预约和间隔拍照；已开始的录像仍可用录制／停止按钮结束。')
+        sidebar.addWidget(self.cancel_plans_btn)
         sidebar.addStretch()
         sidebar.addWidget(label('保存位置', 'section'))
         self.output_label = label(str(self.output_dir), 'muted', True)
@@ -366,7 +419,12 @@ class MainWindow(QMainWindow):
         sidebar.addSpacing(10)
         sidebar.addWidget(button('体验多机位演示', self.add_demo_pair))
         sidebar.addWidget(button('使用说明', self.show_help))
-        splitter.addWidget(left)
+        sidebar_scroll = QScrollArea()
+        sidebar_scroll.setWidgetResizable(True)
+        sidebar_scroll.setMinimumWidth(260)
+        sidebar_scroll.setMaximumWidth(280)
+        sidebar_scroll.setWidget(left)
+        splitter.addWidget(sidebar_scroll)
 
         center = QWidget()
         center_layout = QVBoxLayout(center)
@@ -401,8 +459,8 @@ class MainWindow(QMainWindow):
 
         inspector_scroll = QScrollArea()
         inspector_scroll.setWidgetResizable(True)
-        inspector_scroll.setMinimumWidth(270)
-        inspector_scroll.setMaximumWidth(330)
+        inspector_scroll.setMinimumWidth(310)
+        inspector_scroll.setMaximumWidth(350)
         right = QFrame()
         right.setObjectName('panel')
         self.inspector_layout = QVBoxLayout(right)
@@ -444,6 +502,14 @@ class MainWindow(QMainWindow):
         control.addWidget(self.apply_btn)
         self.actual_label = label('实际格式将在画面到达后显示', 'muted', True)
         control.addWidget(self.actual_label)
+        self.duration_enabled = QCheckBox('录像达到时长后自动停止')
+        control.addWidget(self.duration_enabled)
+        self.record_duration = DurationEdit(self.prefs.get('record_duration', 60))
+        control.addWidget(self.record_duration)
+        self.duration_enabled.setChecked(bool(self.prefs.get('duration_enabled', False)))
+        self.record_duration.setEnabled(self.duration_enabled.isChecked())
+        self.duration_enabled.toggled.connect(self.record_duration.setEnabled)
+        control.addWidget(label('此设置用于下次开始的录像；每路独立计时。', 'muted', True))
         control.addWidget(label('图像调整', 'section'))
         self.sliders = {}
         for name, title, lo, hi, default in [('brightness', '亮度', -100, 100, 0),
@@ -478,7 +544,7 @@ class MainWindow(QMainWindow):
         self.inspector_layout.addStretch()
         inspector_scroll.setWidget(right)
         splitter.addWidget(inspector_scroll)
-        splitter.setSizes([230, 850, 290])
+        splitter.setSizes([260, 800, 330])
         splitter.setStretchFactor(1, 1)
         self.notice = label('就绪 · 图像仅在本机处理与保存', 'notice', True)
         page.addWidget(self.notice)
@@ -543,6 +609,8 @@ class MainWindow(QMainWindow):
         tile.snapshot_save_as.connect(lambda: self.snapshot_one(key, prompt=True))
         tile.record.connect(lambda: self.toggle_record(key))
         tile.remove.connect(lambda: self.remove_camera(key))
+        tile.timer_requested.connect(lambda: self.timer_for_camera(key))
+        tile.zoom_requested.connect(lambda value: worker.set_hardware('zoom', value))
         # A removed camera may have queued signals when its index is reused.
         def guarded(callback):
             return lambda *args: callback(*args) if self.sessions.get(key) is session else None
@@ -551,6 +619,8 @@ class MainWindow(QMainWindow):
         worker.stats_changed.connect(guarded(lambda stats: self.stats_arrived(key, stats)))
         worker.formats_available.connect(guarded(lambda modes: self.formats_arrived(key, modes)))
         worker.format_changed.connect(guarded(lambda ok, config, message: self.format_applied(key, ok, config, message)))
+        worker.zoom_available.connect(guarded(lambda caps: self.zoom_available(key, caps)))
+        worker.hardware_changed.connect(guarded(lambda name, value, ok: self.hardware_feedback(key, name, value, ok)))
         worker.error.connect(guarded(lambda message: self.camera_error(key, message)))
         worker.status_changed.connect(guarded(lambda message: self.camera_status(key, message)))
         worker.snapshot_saved.connect(guarded(lambda path: self.notify('照片已保存：' + path)))
@@ -580,9 +650,109 @@ class MainWindow(QMainWindow):
         if s.recording:
             seconds = int(stats.get('recording_seconds', 0))
             text += '   ● %02d:%02d' % (seconds // 60, seconds % 60)
+            remaining = stats.get('recording_remaining')
+            if remaining is not None:
+                text += ' · 剩余 %d 秒' % math.ceil(remaining)
+        if s.schedule:
+            text += ' · 预约 ' + datetime.fromtimestamp(s.schedule['starts_at']).strftime('%H:%M:%S')
+        if s.photo_plan:
+            text += ' · 间隔拍照中'
         s.tile.info.setText(text)
         if self.selected == key:
             self.actual_label.setText(self.format_description(stats))
+
+    def zoom_available(self, key, caps):
+        s = self.sessions.get(key)
+        if s:
+            s.zoom_caps = dict(caps)
+            s.tile.set_zoom(caps)
+
+    def hardware_feedback(self, key, name, value, ok):
+        s = self.sessions.get(key)
+        if name != 'zoom' or not s:
+            return
+        if value is not None:
+            s.zoom_caps['current'] = value
+            s.tile.zoom_value.setValue(int(value))
+        self.notify('%s：%s' % (s.device.name, '变焦已生效（设备值 %s）' % value if ok else '设备未确认变焦结果，请查看画面或检查设备。'))
+
+    def timer_dialog(self, key=None):
+        if not self.sessions:
+            self.notify('请先添加机位，再设置定时拍摄。')
+            return
+        dialog = TimerDialog(list(self.sessions.values()), key, self.output_dir, dict(self.media_formats), self)
+        if dialog.exec() != QDialog.Accepted:
+            return
+        try:
+            self.create_capture_plan(**dialog.plan)
+        except ValueError as exc:
+            QMessageBox.warning(self, '无法创建拍摄任务', str(exc))
+
+    def timer_for_camera(self, key):
+        s = self.sessions.get(key)
+        if s and (s.schedule or s.photo_plan):
+            s.schedule = s.photo_plan = None
+            self.tick_capture_plans()
+            self.notify('%s：已取消此机位的预约或间隔拍照，录像可继续。' % s.device.name)
+        else:
+            self.timer_dialog(key)
+
+    def create_capture_plan(self, keys, kind, starts_at, duration, interval=5):
+        keys = list(dict.fromkeys(keys))
+        if kind not in ('video', 'photo') or not keys:
+            raise ValueError('请选择拍摄方式和机位。')
+        if not all(math.isfinite(float(v)) for v in (starts_at, duration, interval)) or not 0 < duration <= 604800 or interval < .1:
+            raise ValueError('拍摄时长须大于 0 且不超过 7 天，拍照间隔须至少 0.1 秒。')
+        chosen = [self.sessions.get(key) for key in keys]
+        for s in chosen:
+            if s is None or not self._can_save(s) or not s.worker.isRunning() or s.schedule or (kind == 'photo' and s.photo_plan):
+                raise ValueError('所选机位未就绪或已有定时任务，请先取消该任务。')
+            if kind == 'video' and not self._can_start_recording(s):
+                raise ValueError('所选机位正在录像，请停止后再创建录像任务；间隔拍照可在录像中运行。')
+        targets = self._automatic_targets(chosen, 'video') if kind == 'video' else []
+        for index, s in enumerate(chosen):
+            s.schedule = {'kind': kind, 'starts_at': float(starts_at), 'duration': float(duration),
+                          'interval': float(interval), 'directory': Path(self.output_dir),
+                          'suffix': self.media_formats[kind],
+                          'target': targets[index] if kind == 'video' else None}
+        self.notify('已创建 %d 个机位的%s任务。' % (len(chosen), '录像' if kind == 'video' else '间隔拍照'))
+        self.tick_capture_plans()
+
+    def tick_capture_plans(self):
+        if self.closing:
+            return
+        wall, now = time.time(), time.monotonic()
+        for s in list(self.sessions.values()):
+            plan = s.schedule
+            if plan and wall >= plan['starts_at']:
+                s.schedule = None
+                if wall - plan['starts_at'] > 60 or not self._can_save(s) or not s.worker.isRunning():
+                    self.notify('%s：预约已错过或机位不可用，任务已取消。' % s.device.name)
+                elif plan['kind'] == 'video':
+                    self._start_record_one(s, plan['target'], plan['duration'])
+                else:
+                    s.photo_plan = dict(plan, end=now + plan['duration'], next=now)
+            plan = s.photo_plan
+            if plan:
+                if now >= plan['end'] or not self._can_save(s) or not s.worker.isRunning():
+                    s.photo_plan = None
+                elif now >= plan['next']:
+                    target = self._automatic_targets([s], 'photo', directory=plan['directory'], suffix=plan['suffix'])[0]
+                    s.worker.take_snapshot(target.path)
+                    plan['next'] += max(1, math.floor((now - plan['next']) / plan['interval']) + 1) * plan['interval']
+            if s.schedule or s.photo_plan:
+                self.stats_arrived(s.key, s.stats)
+        scheduled = sum(s.schedule is not None for s in self.sessions.values())
+        photos = sum(s.photo_plan is not None for s in self.sessions.values())
+        self.plans_label.setText('预约：%d 路 · 间隔拍照：%d 路' % (scheduled, photos) if scheduled or photos else '暂无预约或间隔拍照任务')
+        self.cancel_plans_btn.setEnabled(bool(scheduled or photos))
+        self._update_actions()
+
+    def cancel_capture_plans(self, checked=False):
+        for s in self.sessions.values():
+            s.schedule = s.photo_plan = None
+        self.tick_capture_plans()
+        self.notify('预约和间隔拍照任务已取消。')
 
     @staticmethod
     def format_description(stats):
@@ -631,6 +801,7 @@ class MainWindow(QMainWindow):
         if not s:
             return
         s.ready = False
+        s.schedule = s.photo_plan = None
         s.recording = False
         s.pending_record = False
         s.record_action = None
@@ -650,6 +821,7 @@ class MainWindow(QMainWindow):
             return
         self._remember(s)
         s.removing = True
+        s.schedule = s.photo_plan = None
         s.tile.setEnabled(False)
         s.worker.shutdown()
         if not s.worker.isRunning():
@@ -827,11 +999,11 @@ class MainWindow(QMainWindow):
         self.notify('正在为 %s 切换至 %d × %d，其他机位继续运行。' % (s.device.name, requested.width, requested.height))
         self._update_actions()
 
-    def _suggested_path(self, s, kind, stamp=None):
+    def _suggested_path(self, s, kind, stamp=None, directory=None, suffix=None):
         stamp = stamp or datetime.now().strftime('%Y%m%d_%H%M%S_%f')
         name = ''.join(c if c.isalnum() or c in '-_' else '_' for c in s.device.name)[:45]
-        suffix = self.media_formats[kind]
-        return self.output_dir / ('%s_cam%d_%s%s' % (stamp, s.number, name, suffix))
+        suffix = suffix or self.media_formats[kind]
+        return (directory if directory is not None else self.output_dir) / ('%s_cam%d_%s%s' % (stamp, s.number, name, suffix))
 
     def _confirm_save_targets(self, targets):
         busy = [s.pending_save_path for s in self.sessions.values() if s.pending_save_path]
@@ -890,14 +1062,14 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, '请检查保存位置', str(exc))
             return None
 
-    def _automatic_targets(self, sessions, kind):
+    def _automatic_targets(self, sessions, kind, directory=None, suffix=None):
         directory = self.output_dir.resolve()
         # Counter plus existence checks also cover rapid clicks or a system
         # clock moved backwards; quick capture never asks to overwrite a file.
         while True:
             self.automatic_save_sequence += 1
             stamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f') + '_%04d' % self.automatic_save_sequence
-            targets = [SaveTarget(s.key, self._suggested_path(s, kind, stamp)) for s in sessions]
+            targets = [SaveTarget(s.key, self._suggested_path(s, kind, stamp, directory, suffix)) for s in sessions]
             if not any(target.path.exists() for target in targets):
                 break
         return validate_targets(targets, shared_directory=directory)
@@ -952,16 +1124,21 @@ class MainWindow(QMainWindow):
             self.notify('正在保存各机位照片，录像继续进行。' if any(s.recording for s in sessions) else '正在保存各机位照片…')
 
     def _can_start_recording(self, s):
-        return self._can_save(s) and not s.recording and not s.pending_record
+        return self._can_save(s) and not s.recording and not s.pending_record and not (s.schedule and s.schedule['kind'] == 'video')
 
-    def _start_record_one(self, s, target):
+    def _start_record_one(self, s, target, duration_seconds=None):
         if not self._can_start_recording(s):
             return
+        if duration_seconds is None:
+            duration_seconds = self.record_duration.value() if self.duration_enabled.isChecked() else 0
+            if self.duration_enabled.isChecked() and duration_seconds <= 0:
+                self.notify('请先设置大于 0 的录像时长。')
+                return
         s.last_error = ''
         s.pending_save_path = str(target.path)
         s.pending_record = True
         s.record_action = 'start'
-        s.worker.start_recording(target.path, overwrite=target.overwrite)
+        s.worker.start_recording(target.path, overwrite=target.overwrite, duration_seconds=duration_seconds)
         self._update_actions()
 
     def _stop_record_one(self, s):
@@ -980,6 +1157,10 @@ class MainWindow(QMainWindow):
             return
         if s.recording or s.record_action == 'start':
             self._stop_record_one(s)
+            return
+        if s.schedule and s.schedule['kind'] == 'video':
+            s.schedule = None
+            self.tick_capture_plans()
             return
         if not self._can_start_recording(s):
             return
@@ -1007,6 +1188,7 @@ class MainWindow(QMainWindow):
             self._remember_save_directory(started[0].path)
 
     def stop_all_recordings(self, checked=False):
+        self.cancel_capture_plans()
         for s in list(self.sessions.values()):
             self._stop_record_one(s)
 
@@ -1019,12 +1201,16 @@ class MainWindow(QMainWindow):
         self.all_photo.setEnabled(ready)
         self.all_record.setEnabled(idle)
         self.all_record.setText('● 开始其余机位' if idle and busy else '● 全部开始录像')
-        self.all_stop.setEnabled(can_stop)
+        self.all_stop.setEnabled(can_stop or any(s.schedule or s.photo_plan for s in self.sessions.values()))
         count = sum(s.recording for s in self.sessions.values())
         self.count_label.setText('%d 个机位%s' % (len(self.sessions), ' · %d 路录像' % count if count else ''))
         for s in self.sessions.values():
             s.tile.photo_btn.setEnabled(s.ready and not s.removing and not s.format_pending)
-            if s.record_action == 'stop':
+            s.tile.timer_btn.setText('取消定时' if s.schedule or s.photo_plan else '定时')
+            if s.schedule and s.schedule['kind'] == 'video' and not s.recording:
+                s.tile.rec_btn.setText('取消预约')
+                s.tile.rec_btn.setEnabled(True)
+            elif s.record_action == 'stop':
                 s.tile.rec_btn.setText('正在保存…')
                 s.tile.rec_btn.setEnabled(False)
             elif s.record_action == 'start':
@@ -1098,6 +1284,8 @@ class MainWindow(QMainWindow):
         self.prefs['output_dir'] = str(self.output_dir) if self.output_custom else None
         self.prefs['photo_format'] = self.media_formats['photo']
         self.prefs['video_format'] = self.media_formats['video']
+        self.prefs['duration_enabled'] = self.duration_enabled.isChecked()
+        self.prefs['record_duration'] = self.record_duration.value()
         try:
             target = self.data_dir / 'settings.json'
             temporary = target.with_suffix('.tmp')
@@ -1115,6 +1303,7 @@ class MainWindow(QMainWindow):
             return
         self._save_prefs()
         self.closing = True
+        self.capture_timer.stop()
         for s in self.sessions.values():
             s.worker.shutdown()
         self.centralWidget().setEnabled(False)

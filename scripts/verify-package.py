@@ -21,11 +21,14 @@ def main():
     parser.add_argument('--exe', type=Path, required=True)
     parser.add_argument('--work-dir', type=Path, required=True)
     parser.add_argument('--formats', action='store_true')
+    parser.add_argument('--timers', action='store_true')
     parser.add_argument('--channels', type=int, choices=range(1, 9), default=2)
     parser.add_argument('--platform', choices=['offscreen', 'windows'], default='offscreen')
     args = parser.parse_args()
     if args.formats and args.channels != 2:
         parser.error('The format scenario uses exactly two channels')
+    if args.formats and args.timers:
+        parser.error('Select either formats or timers')
     exe, work = args.exe.resolve(), args.work_dir.resolve()
     if work.exists() and list(work.iterdir()):
         raise SystemExit('Use a new empty verification directory.')
@@ -37,7 +40,7 @@ def main():
     windows = environment.get('SystemRoot', 'C:\\Windows')
     environment['PATH'] = os.path.join(windows, 'System32') + os.pathsep + windows
     environment['QT_QPA_PLATFORM'] = args.platform
-    mode = '--smoke-test-formats' if args.formats else '--smoke-test'
+    mode = '--smoke-test-timers' if args.timers else '--smoke-test-formats' if args.formats else '--smoke-test'
     result = subprocess.run([str(exe), mode, '--demo-count', str(args.channels), '--data-dir', str(work)],
                             env=environment, cwd=str(work), timeout=90)
     assert result.returncode == 0, 'The packaged app exited with an error'
@@ -62,10 +65,15 @@ def main():
     files = list((work / 'captures').iterdir())
     photos = [path for path in files if path.suffix in photo_suffixes]
     videos = [path for path in files if path.suffix in video_suffixes]
-    assert len(photos) == (5 if args.formats else args.channels) and len(videos) == args.channels, 'Multi-camera output was not completed'
+    if args.timers:
+        assert runtime.get('timed_capture') and runtime.get('demo_zoom_disabled') and runtime.get('storage_estimate_visible')
+        assert args.channels * 2 <= len(photos) <= args.channels * 4
+    else:
+        assert len(photos) == (5 if args.formats else args.channels), 'Photo output was not completed'
+    assert len(videos) == args.channels, 'Multi-camera video output was not completed'
     assert {path.suffix for path in photos} == photo_suffixes
     assert {path.suffix for path in videos} == video_suffixes
-    expected = (480, 640) if args.formats else (720, 1280)
+    expected = (480, 640) if args.formats or args.timers else (720, 1280)
     for photo in photos:
         image = cv2.imdecode(np.fromfile(str(photo), dtype=np.uint8), cv2.IMREAD_COLOR)
         assert image is not None and image.shape[:2] == expected
@@ -87,11 +95,14 @@ def main():
             cap.release()
         assert decoded > 0 and abs(decoded - frames) <= 1
         assert (width, height) == (expected[1], expected[0]) and fps > 0 and 1.5 < frames / fps < 8
+        if args.timers:
+            assert abs(frames / fps - 3) < .15
         recordings.append({'format': path.suffix, 'width': width, 'height': height, 'fps': fps, 'frames': frames, 'decoded_frames': decoded, 'seconds': frames / fps})
     report = {'executable': exe.name, 'photos': len(photos), 'recordings': recordings,
               'version': runtime['version'], 'channels': args.channels, 'qt_platform': args.platform,
               'core_modules_and_runtime_libraries_loaded_from_bundle': True, 'frozen': True,
-              'clean_environment': True, 'unicode_data_directory': str(work), 'multi_format_recording_with_photos': args.formats}
+              'clean_environment': True, 'unicode_data_directory': str(work), 'multi_format_recording_with_photos': args.formats,
+              'scheduled_auto_stop_and_interval_photos': args.timers}
     (work / 'verification-result.json').write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8')
     print(json.dumps(report, ensure_ascii=True))
 

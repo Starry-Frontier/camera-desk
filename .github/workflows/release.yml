@@ -66,6 +66,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Standalone multi-camera test failed.' }
           .\.venv\Scripts\python.exe scripts/verify-package.py --exe CameraDesk-Standalone-Windows-x64.exe --work-dir "test-output/standalone-formats-中文目录" --formats
           if ($LASTEXITCODE -ne 0) { throw 'Standalone format test failed.' }
+          .\.venv\Scripts\python.exe scripts/verify-package.py --exe build/portable-dist/CameraDesk/CameraDesk.exe --work-dir "test-output/packaged-timers-中文目录" --channels 8 --timers
+          if ($LASTEXITCODE -ne 0) { throw 'Packaged timer and interval photo test failed.' }
+          .\.venv\Scripts\python.exe scripts/verify-package.py --exe CameraDesk-Standalone-Windows-x64.exe --work-dir "test-output/standalone-timers-中文目录" --channels 8 --timers
+          if ($LASTEXITCODE -ne 0) { throw 'Standalone timer and interval photo test failed.' }
       - name: Package application source and third-party sources
         shell: pwsh
         run: |

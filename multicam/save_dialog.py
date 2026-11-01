@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog
 
 from .saving import SaveTarget, media_path, validate_filename, validate_targets
 from .media_formats import change_suffix, format_for_extension, formats_for
+from .widgets import SelectionComboBox as QComboBox
 
 
 class BatchSaveDialog(QDialog):

@@ -40,7 +40,7 @@ def _loaded_windows_modules():
     return result
 
 
-def schedule_smoke_test(window, data, formats=False, channels=2):
+def schedule_smoke_test(window, data, formats=False, channels=2, timers=False):
     evidence = {'version': __version__, 'channels': channels, 'errors': [],
                 'recording_events': [], 'photos': [], 'unexpected_dialogs': [],
                 'frozen': bool(getattr(sys, 'frozen', False)),
@@ -75,7 +75,7 @@ def schedule_smoke_test(window, data, formats=False, channels=2):
             QTimer.singleShot(100, prepare)
             return
         observe()
-        if not formats:
+        if not formats and not timers:
             window.record_all(prompt=False)
             QTimer.singleShot(1000, window.all_photo.click)
             QTimer.singleShot(3500, window.stop_all_recordings)
@@ -96,6 +96,32 @@ def schedule_smoke_test(window, data, formats=False, channels=2):
     def begin():
         if not all(s.stats.get('width') == 640 and s.stats.get('height') == 480 for s in window.sessions.values()):
             QTimer.singleShot(100, begin)
+            return
+        if timers:
+            from .timer_dialog import TimerDialog
+            dialog = TimerDialog(list(window.sessions.values()), None, window.output_dir, window.media_formats, window)
+            dialog.kind.setCurrentIndex(1)
+            dialog.show()
+            QApplication.processEvents()
+            evidence['storage_estimate_visible'] = '预估占用' in dialog.estimate.text() and '磁盘剩余' in dialog.estimate.text()
+            dialog.grab().save(str(data / 'timer-preview.png'))
+            dialog.close()
+            evidence['timed_capture'] = True
+            evidence['demo_zoom_disabled'] = all(not s.tile.zoom_apply.isEnabled() for s in window.sessions.values())
+            window.create_capture_plan(list(window.sessions), 'video', time.time() + .5, 3)
+            def interval_photos():
+                if not all(s.recording for s in window.sessions.values()):
+                    QTimer.singleShot(100, interval_photos)
+                    return
+                window.create_capture_plan(list(window.sessions), 'photo', time.time(), 1.8, .6)
+            def finish_when_stopped():
+                if any(s.recording or s.pending_record or s.schedule or s.photo_plan for s in window.sessions.values()):
+                    QTimer.singleShot(100, finish_when_stopped)
+                    return
+                window.grab().save(str(data / 'app-preview.png'))
+                window.close()
+            QTimer.singleShot(800, interval_photos)
+            QTimer.singleShot(4300, finish_when_stopped)
             return
         window.remember_media_format('video', '.mp4')
         window.toggle_record('demo:0', prompt=False)

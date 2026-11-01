@@ -1,0 +1,96 @@
+"""User-selected start, duration, interval and storage planning."""
+import time
+from PySide6.QtCore import QDateTime
+from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFormLayout, QLabel,
+                              QVBoxLayout, QMessageBox)
+from .widgets import SelectionComboBox, SelectionDateTimeEdit, DurationEdit, DecimalBox
+from .storage import estimate_storage, format_bytes, free_space
+
+
+class TimerDialog(QDialog):
+    def __init__(self, sessions, selected, directory, formats, parent=None):
+        super().__init__(parent)
+        self.sessions, self.directory, self.formats = list(sessions), directory, formats
+        self.plan = None
+        self.setWindowTitle('定时拍摄与存储预估')
+        self.setMinimumWidth(610)
+        layout = QVBoxLayout(self)
+        form = QFormLayout()
+        self.scope = SelectionComboBox()
+        self.scope.addItem('全部已添加机位', None)
+        for s in self.sessions:
+            self.scope.addItem('%02d · %s' % (s.number, s.device.name), s.key)
+        if selected is not None:
+            self.scope.setCurrentIndex(self.scope.findData(selected))
+        form.addRow('机位', self.scope)
+        self.kind = SelectionComboBox()
+        self.kind.addItem('录像（达到时长自动停止）', 'video')
+        self.kind.addItem('间隔自动拍照', 'photo')
+        form.addRow('拍摄方式', self.kind)
+        self.start_mode = SelectionComboBox()
+        self.start_mode.addItems(['立即开始', '预约开始时间'])
+        form.addRow('开始方式', self.start_mode)
+        self.start_at = SelectionDateTimeEdit(QDateTime.currentDateTime().addSecs(60))
+        self.start_at.setCalendarPopup(True)
+        self.start_at.setDisplayFormat('yyyy-MM-dd HH:mm:ss')
+        self.start_at.setEnabled(False)
+        form.addRow('本地开始时间', self.start_at)
+        self.duration = DurationEdit(60)
+        form.addRow('拍摄持续时间', self.duration)
+        self.interval = DecimalBox()
+        self.interval.setRange(.1, 86400)
+        self.interval.setDecimals(1)
+        self.interval.setValue(5)
+        self.interval.setSuffix(' 秒 / 张')
+        self.interval.setEnabled(False)
+        form.addRow('拍照间隔', self.interval)
+        layout.addLayout(form)
+        self.estimate = QLabel()
+        self.estimate.setWordWrap(True)
+        self.estimate.setObjectName('storageEstimate')
+        layout.addWidget(self.estimate)
+        hint = QLabel('使用左侧预设目录和格式，自动命名且不覆盖已有文件。\n'
+                      '预约需保持软件运行、电脑不休眠；错过开始时间超过 60 秒会取消。\n'
+                      '照片从开始时拍第一张，忙碌或延迟时跳过错过的轮次。存储为粗略范围，画面复杂度会影响实际大小。')
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        buttons.button(QDialogButtonBox.Ok).setText('创建拍摄任务')
+        buttons.button(QDialogButtonBox.Cancel).setText('取消')
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        for combo in (self.scope, self.kind, self.start_mode):
+            combo.currentIndexChanged.connect(self.update_estimate)
+        for box in self.duration.parts:
+            box.valueChanged.connect(self.update_estimate)
+        self.interval.valueChanged.connect(self.update_estimate)
+        self.update_estimate()
+
+    def chosen(self):
+        key = self.scope.currentData()
+        return [s for s in self.sessions if key is None or key == s.key]
+
+    def update_estimate(self, *_):
+        photo = self.kind.currentData() == 'photo'
+        self.interval.setEnabled(photo)
+        self.start_at.setEnabled(self.start_mode.currentIndex() == 1)
+        suffix = self.formats['photo' if photo else 'video']
+        result = estimate_storage([s.config for s in self.chosen()], self.duration.value(), suffix,
+                                  self.interval.value() if photo else None)
+        available = free_space(self.directory)
+        self.estimate.setText('格式：%s · %d 个机位%s\n预估占用：%s ～ %s\n磁盘剩余：%s\n保存目录：%s' % (
+            suffix, len(self.chosen()), ' · 预计 %d 张照片' % result['photos'] if photo else '',
+            format_bytes(result['minimum_bytes']), format_bytes(result['maximum_bytes']),
+            format_bytes(available) if available is not None else '无法读取', self.directory))
+        self.estimate.setStyleSheet('color: #a83e37;' if available is not None and result['maximum_bytes'] > available else '')
+
+    def accept(self):
+        duration = self.duration.value()
+        starts_at = self.start_at.dateTime().toMSecsSinceEpoch() / 1000 if self.start_mode.currentIndex() else time.time()
+        if duration <= 0 or not self.chosen() or (self.start_mode.currentIndex() and starts_at <= time.time()):
+            QMessageBox.warning(self, '请检查拍摄设置', '请选择机位、正数拍摄时长，以及未来的预约时间。')
+            return
+        self.plan = {'keys': [s.key for s in self.chosen()], 'kind': self.kind.currentData(),
+                     'starts_at': starts_at, 'duration': duration, 'interval': self.interval.value()}
+        super().accept()

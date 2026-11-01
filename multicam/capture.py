@@ -24,6 +24,7 @@ from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
 from .formats import enumerate_camera_modes
+from .hardware import read_camera_zoom
 from .media_formats import format_for_extension
 
 
@@ -76,6 +77,7 @@ class ImageSettings:
 class SaveRequest:
     path: str
     overwrite: bool = False
+    duration_seconds: float = 0.0
 
 
 def apply_image_settings(frame: np.ndarray, settings: ImageSettings) -> np.ndarray:
@@ -138,6 +140,7 @@ class CameraWorker(QThread):
     snapshot_saved = Signal(str)
     recording_changed = Signal(bool, str)
     hardware_changed = Signal(str, object, bool)
+    zoom_available = Signal(dict)
     formats_available = Signal(list)
     format_changed = Signal(bool, dict, str)
 
@@ -161,6 +164,8 @@ class CameraWorker(QThread):
         self._record_last_frame = None
         self._record_size = None
         self._record_overwrite = False
+        self._record_deadline = None
+        self._zoom = {'supported': False, 'reason': '演示机位不支持硬件变焦'}
         self._hardware = {}
         self._hardware_requests = {}
         self._modes = []
@@ -190,8 +195,11 @@ class CameraWorker(QThread):
     def take_snapshot(self, path, overwrite=False):
         self._commands.put(("snapshot", SaveRequest(str(path), bool(overwrite))))
 
-    def start_recording(self, path, overwrite=False):
-        self._commands.put(("record", SaveRequest(str(path), bool(overwrite))))
+    def start_recording(self, path, overwrite=False, duration_seconds=0):
+        duration = float(duration_seconds)
+        if not math.isfinite(duration) or duration < 0 or duration > 604800:
+            raise ValueError('录像时长须为 0（不限）至 604800 秒。')
+        self._commands.put(("record", SaveRequest(str(path), bool(overwrite), duration)))
 
     def stop_recording(self):
         self._commands.put(("stop_record", None))
@@ -210,14 +218,26 @@ class CameraWorker(QThread):
             if not self._demo:
                 try:
                     with _DEVICE_CONTROL_LOCK:
+                        self._zoom = read_camera_zoom(int(self.device_id))
+                except Exception:
+                    self._zoom = {'supported': False, 'reason': '未能读取变焦范围，设备可继续预览'}
+                try:
+                    with _DEVICE_CONTROL_LOCK:
                         self._modes = enumerate_camera_modes(int(self.device_id))
                 except Exception as exc:
                     self.status_changed.emit('未能读取设备格式，可手动输入分辨率：%s' % exc)
                 self.formats_available.emit([asdict(mode) for mode in self._modes])
             self._apply_format(self._config, initial=True)
+            if self._zoom.get('supported'):
+                current = self._capture.get(cv2.CAP_PROP_ZOOM)
+                self._zoom['current'] = int(current) if math.isfinite(current) and self._zoom['minimum'] <= current <= self._zoom['maximum'] else None
+            self.zoom_available.emit(dict(self._zoom))
             self.status_changed.emit("演示预览中" if self._demo else "预览中")
             while not self._stop_event.is_set():
                 self._drain_commands()
+                if self._writer is not None and self._record_deadline is not None and time.monotonic() >= self._record_deadline:
+                    self._finish_recording()
+                    self.status_changed.emit('已达到设定时长，录像已保存')
                 if self._stop_event.is_set():
                     break
                 now = time.monotonic()
@@ -257,7 +277,11 @@ class CameraWorker(QThread):
                     self._begin_recording(path)
                 self._fulfil_snapshots()
                 if self._writer is not None:
-                    self._record_frame(self._frame, now)
+                    if self._record_deadline is not None and now >= self._record_deadline:
+                        self._finish_recording()
+                        self.status_changed.emit('已达到设定时长，录像已保存')
+                    else:
+                        self._record_frame(self._frame, now)
                 if now - last_preview >= .05 and self._preview_credit.is_set():
                     self._emit_preview(self._frame)
                     last_preview = now
@@ -432,6 +456,8 @@ class CameraWorker(QThread):
                 self.error.emit('画面已恢复，但设备参数未能恢复：%s' % exc)
 
     def _apply_hardware(self, name, value):
+        if name == 'zoom':
+            return self._apply_zoom(value)
         labels = {"exposure": "曝光", "auto_exposure": "自动曝光", "autofocus": "自动对焦",
                   "white_balance": "白平衡", "auto_white_balance": "自动白平衡"}
         properties = {
@@ -469,6 +495,28 @@ class CameraWorker(QThread):
         self.hardware_changed.emit(name, actual, True)
         self.status_changed.emit("已向设备应用%s%s" % (label, "（设备未返回数值）" if actual is None else ""))
 
+    def _apply_zoom(self, value):
+        previous = self._zoom.get('current')
+        try:
+            if self._demo or not self._zoom.get('supported') or self._capture is None:
+                raise ValueError('此机位未报告可用的硬件变焦。')
+            number = float(value)
+            low, high, step = (self._zoom[k] for k in ('minimum', 'maximum', 'step'))
+            if not math.isfinite(number) or number != int(number) or not low <= number <= high or (int(number) - low) % step:
+                raise ValueError('变焦值须在 %d 至 %d 内，步长为 %d。' % (low, high, step))
+            with _DEVICE_CONTROL_LOCK:
+                success = self._capture.set(cv2.CAP_PROP_ZOOM, number)
+                actual = self._capture.get(cv2.CAP_PROP_ZOOM)
+            if not success or not math.isfinite(actual) or abs(actual - number) > .01:
+                raise ValueError('设备未确认变焦生效，请检查设备支持情况。')
+            self._zoom['current'] = int(actual)
+            self._hardware['zoom'] = int(actual)
+            self._hardware_requests['zoom'] = int(number)
+            self.hardware_changed.emit('zoom', int(actual), True)
+        except Exception:
+            self.hardware_changed.emit('zoom', previous, False)
+            raise
+
     def _emit_preview(self, frame):
         height, width = frame.shape[:2]
         if width > 960:
@@ -491,6 +539,7 @@ class CameraWorker(QThread):
             "requested_width": self._config.width, "requested_height": self._config.height,
             "requested_fps": self._config.fps,
             "recording_seconds": max(0.0, now - self._record_started) if self._writer is not None else 0.0,
+            "recording_remaining": max(0.0, self._record_deadline - now) if self._writer is not None and self._record_deadline is not None else None,
             "hardware": dict(self._hardware),
         })
 
@@ -560,6 +609,7 @@ class CameraWorker(QThread):
             self._record_path, self._record_temp = path, temporary
             self._record_fps = fps
             self._record_started = time.monotonic()
+            self._record_deadline = self._record_started + request.duration_seconds if request.duration_seconds else None
             self._record_count = 0
             self._record_last_frame = self._frame.copy()
             self._record_size = (width, height)
@@ -600,7 +650,8 @@ class CameraWorker(QThread):
         path, temporary = self._record_path, self._record_temp
         try:
             if pad:
-                target = max(1, int(math.ceil((time.monotonic() - self._record_started) * self._record_fps)))
+                stop_clock = min(time.monotonic(), self._record_deadline) if self._record_deadline is not None else time.monotonic()
+                target = max(1, int(math.ceil((stop_clock - self._record_started) * self._record_fps)))
                 self._write_recording_until(target)
         except Exception as exc:
             self.error.emit("录像结束前补帧失败：%s" % exc)
@@ -631,6 +682,7 @@ class CameraWorker(QThread):
         self.recording_changed.emit(False, str(path) if saved else "")
         self._record_path = self._record_temp = None
         self._record_started = 0.0
+        self._record_deadline = None
         self._record_size = None
         self._record_overwrite = False
 

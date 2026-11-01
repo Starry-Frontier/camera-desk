@@ -67,6 +67,7 @@ def main():
     videos = [path for path in files if path.suffix in video_suffixes]
     if args.timers:
         assert runtime.get('timed_capture') and runtime.get('demo_zoom_disabled') and runtime.get('storage_estimate_visible')
+        assert runtime.get('photo_start_time_selectable'), 'Packaged photo date/time selectors failed'
         assert args.channels * 2 <= len(photos) <= args.channels * 4
     else:
         assert len(photos) == (5 if args.formats else args.channels), 'Photo output was not completed'

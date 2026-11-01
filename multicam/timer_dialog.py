@@ -3,7 +3,7 @@ import time
 from PySide6.QtCore import QDateTime
 from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFormLayout, QLabel,
                               QVBoxLayout, QMessageBox)
-from .widgets import SelectionComboBox, SelectionDateTimeEdit, DurationEdit, DecimalBox
+from .widgets import SelectionComboBox, DateTimePicker, DurationEdit, DecimalBox
 from .storage import estimate_storage, format_bytes, free_space
 
 
@@ -30,11 +30,11 @@ class TimerDialog(QDialog):
         self.start_mode = SelectionComboBox()
         self.start_mode.addItems(['立即开始', '预约开始时间'])
         form.addRow('开始方式', self.start_mode)
-        self.start_at = SelectionDateTimeEdit(QDateTime.currentDateTime().addSecs(60))
-        self.start_at.setCalendarPopup(True)
-        self.start_at.setDisplayFormat('yyyy-MM-dd HH:mm:ss')
-        self.start_at.setEnabled(False)
-        form.addRow('本地开始时间', self.start_at)
+        self.start_at = DateTimePicker(QDateTime.currentDateTime().addSecs(60))
+        form.addRow('本地开始日期 / 时刻', self.start_at)
+        self.start_hint = QLabel()
+        self.start_hint.setWordWrap(True)
+        form.addRow('', self.start_hint)
         self.duration = DurationEdit(60)
         form.addRow('拍摄持续时间', self.duration)
         self.interval = DecimalBox()
@@ -62,6 +62,7 @@ class TimerDialog(QDialog):
         layout.addWidget(buttons)
         for combo in (self.scope, self.kind, self.start_mode):
             combo.currentIndexChanged.connect(self.update_estimate)
+        self.start_at.dateTimeChanged.connect(self.schedule_time_edited)
         for box in self.duration.parts:
             box.valueChanged.connect(self.update_estimate)
         self.interval.valueChanged.connect(self.update_estimate)
@@ -71,10 +72,15 @@ class TimerDialog(QDialog):
         key = self.scope.currentData()
         return [s for s in self.sessions if key is None or key == s.key]
 
+    def schedule_time_edited(self, *_):
+        self.start_mode.setCurrentIndex(1)
+        self.update_estimate()
+
     def update_estimate(self, *_):
         photo = self.kind.currentData() == 'photo'
         self.interval.setEnabled(photo)
-        self.start_at.setEnabled(self.start_mode.currentIndex() == 1)
+        self.start_hint.setText('已选择预约：按所选日期和时、分、秒开始拍摄。' if self.start_mode.currentIndex() == 1
+                                else '当前为立即开始；修改上方日期或时、分、秒，将自动切换为预约。')
         suffix = self.formats['photo' if photo else 'video']
         result = estimate_storage([s.config for s in self.chosen()], self.duration.value(), suffix,
                                   self.interval.value() if photo else None)

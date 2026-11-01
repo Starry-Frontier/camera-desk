@@ -1,7 +1,7 @@
 """Visible selection and stepping controls, including in styled Windows builds."""
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, Qt, QDateTime, QTime, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
-from PySide6.QtWidgets import QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit, QWidget, QHBoxLayout, QSizePolicy
+from PySide6.QtWidgets import QComboBox, QSpinBox, QDoubleSpinBox, QDateTimeEdit, QDateEdit, QWidget, QHBoxLayout, QVBoxLayout, QSizePolicy
 
 
 def selection_arrow(widget):
@@ -32,6 +32,12 @@ class SelectionDateTimeEdit(QDateTimeEdit):
         selection_arrow(self)
 
 
+class SelectionDateEdit(QDateEdit):
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        selection_arrow(self)
+
+
 class StepButtons:
     def paintEvent(self, event):
         super().paintEvent(event)
@@ -50,6 +56,58 @@ class NumberBox(StepButtons, QSpinBox):
 
 class DecimalBox(StepButtons, QDoubleSpinBox):
     pass
+
+
+class DateTimePicker(QWidget):
+    """A calendar and explicit clock fields, rather than a date-only popup."""
+    dateTimeChanged = Signal(QDateTime)
+
+    def __init__(self, value, parent=None):
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(5)
+        self.date = SelectionDateEdit(value.date())
+        self.date.setCalendarPopup(True)
+        self.date.setDisplayFormat('yyyy-MM-dd')
+        self.date.setAccessibleName('预约拍照或录像的开始日期')
+        layout.addWidget(self.date)
+        row = QHBoxLayout()
+        self.parts = []
+        for title, maximum in [('时', 23), ('分', 59), ('秒', 59)]:
+            box = NumberBox()
+            box.setRange(0, maximum)
+            box.setSuffix(' ' + title)
+            box.setMinimumWidth(70)
+            box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
+            box.setAccessibleName('预约开始时间（%s）' % title)
+            row.addWidget(box)
+            self.parts.append(box)
+        self.hours, self.minutes, self.seconds = self.parts
+        layout.addLayout(row)
+        self.setDateTime(value)
+        self.date.dateChanged.connect(self.changed)
+        for box in self.parts:
+            box.valueChanged.connect(self.changed)
+
+    def dateTime(self):
+        return QDateTime(self.date.date(), QTime(*(box.value() for box in self.parts)))
+
+    def setDateTime(self, value):
+        # Atomic update: never advertise an intermediate, possibly past time.
+        controls = [self.date] + self.parts
+        blocked = [control.blockSignals(True) for control in controls]
+        try:
+            self.date.setDate(value.date())
+            for box, number in zip(self.parts, (value.time().hour(), value.time().minute(), value.time().second())):
+                box.setValue(number)
+        finally:
+            for control, previous in zip(controls, blocked):
+                control.blockSignals(previous)
+        self.dateTimeChanged.emit(self.dateTime())
+
+    def changed(self, *_):
+        self.dateTimeChanged.emit(self.dateTime())
 
 
 class DurationEdit(QWidget):

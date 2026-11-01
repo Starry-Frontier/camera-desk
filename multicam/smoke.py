@@ -8,7 +8,7 @@ import time
 import cv2
 import numpy
 import PySide6
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, QDateTime, QTime
 from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 
 from . import __version__
@@ -103,6 +103,14 @@ def schedule_smoke_test(window, data, formats=False, channels=2, timers=False):
             dialog.kind.setCurrentIndex(1)
             dialog.show()
             QApplication.processEvents()
+            editable = dialog.start_at.isEnabled() and all(box.isEnabled() for box in dialog.start_at.parts)
+            selected_time = QDateTime.currentDateTime().addDays(1)
+            selected_time.setTime(QTime(18, 32, 10))
+            dialog.start_at.setDateTime(selected_time)
+            dialog.start_at.hours.setValue(19)
+            actual_time = dialog.start_at.dateTime()
+            evidence['photo_start_time_selectable'] = (editable and dialog.start_mode.currentIndex() == 1
+                and actual_time.date() == selected_time.date() and actual_time.time() == QTime(19, 32, 10))
             evidence['storage_estimate_visible'] = '预估占用' in dialog.estimate.text() and '磁盘剩余' in dialog.estimate.text()
             dialog.grab().save(str(data / 'timer-preview.png'))
             dialog.close()

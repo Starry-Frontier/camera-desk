@@ -98,6 +98,11 @@ def schedule_smoke_test(window, data, formats=False, channels=2, timers=False):
             QTimer.singleShot(100, begin)
             return
         if timers:
+            if not evidence.get('model_check_started'):
+                from .smoke_models import check_bundled_models
+                evidence['model_check_started'] = True
+                check_bundled_models(window, evidence, begin)
+                return
             from .timer_dialog import TimerDialog, PhotoIntervalDialog
             dialog = TimerDialog(list(window.sessions.values()), None, window.output_dir, window.media_formats, window)
             dialog.show()

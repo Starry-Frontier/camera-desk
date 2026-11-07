@@ -8,10 +8,10 @@ import sys
 
 def main():
     parser = argparse.ArgumentParser(description='Camera Desk 多机位摄像台')
-    parser.add_argument('--demo', action='store_true', help='Open two simulated cameras')
+    parser.add_argument('--demo', action='store_true', help='启动模拟摄像头演示（默认 2 路）')
     parser.add_argument('--demo-count', type=int, choices=range(1, 9), default=2,
-                        help='Number of simulated cameras with --demo (1-8)')
-    parser.add_argument('--data-dir', type=Path, help='Settings and default capture folder')
+                        help='演示机位数量，配合 --demo 使用（1～8 路）')
+    parser.add_argument('--data-dir', type=Path, help='设置文件与默认拍摄文件的数据目录')
     parser.add_argument('--smoke-test', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--smoke-test-formats', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--smoke-test-timers', action='store_true', help=argparse.SUPPRESS)

@@ -50,7 +50,8 @@ class TimerDialog(QDialog):
         layout.addWidget(self.estimate)
         hint = QLabel('使用左侧预设目录和格式，自动命名且不覆盖已有文件。\n'
                       '预约需保持软件运行、电脑不休眠；错过开始时间超过 60 秒会取消。\n'
-                      '照片从开始时拍第一张，忙碌或延迟时跳过错过的轮次。存储为粗略范围，画面复杂度会影响实际大小。')
+                      '从开始时拍第一张；忙碌或延迟时跳过错过的轮次。\n'
+                      '存储预估仅供参考，实际占用取决于画面内容和编码。')
         hint.setWordWrap(True)
         layout.addWidget(hint)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)

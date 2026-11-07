@@ -33,6 +33,7 @@ class BatchSaveDialog(QDialog):
         form.addRow('统一保存文件夹', folder_row)
         self.format_combo = QComboBox()
         self.format_combo.setObjectName('batchMediaFormat')
+        self.format_combo.setToolTip('实际保存格式以此项为准；文件名后缀会按此格式调整。')
         for spec in formats_for(kind):
             self.format_combo.addItem(spec.file_filter, spec.suffix)
         selected = format_for_extension(kind, default_format or ('.png' if kind == 'photo' else '.avi'))
@@ -101,6 +102,7 @@ class BatchSaveDialog(QDialog):
         for s in self.sessions:
             name = self.edits[s.key].text()
             validate_filename(name)  # Reject paths/traversal before joining.
+            name = change_suffix(name, self.kind, self.format_combo.currentData())
             targets.append(SaveTarget(s.key, media_path(folder / name, self.kind, self.format_combo.currentData())))
         return validate_targets(targets, shared_directory=folder)
 

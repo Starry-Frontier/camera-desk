@@ -65,9 +65,9 @@ class ObservedWorker(CameraWorker):
 
     def _finish_recording(self, pad=True):
         if self._writer is not None:
-            self.observation['stop_clock'] = time.monotonic()
+            self.observation['stop_clock'] = time.perf_counter()
             super()._finish_recording(pad=pad)
-            self.observation['finalized'] = time.monotonic()
+            self.observation['finalized'] = time.perf_counter()
 
 
 class SimulationWindow(ui.MainWindow):

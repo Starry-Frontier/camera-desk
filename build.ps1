@@ -64,7 +64,7 @@ try {
     }
     $sourceDir = Join-Path $bundleDir 'source'
     New-Item -ItemType Directory -Path $sourceDir -Force | Out-Null
-    foreach ($sourceItem in @('main.py', 'multicam', 'tests', 'assets', '.github', 'docs', 'scripts', 'requirements.txt', 'requirements-dev.txt', 'build.ps1', 'launch.cmd', '.gitignore', 'LICENSE', 'README.md', 'THIRD_PARTY.md', 'LICENSES', 'CHANGELOG.md', 'CONTRIBUTING.md')) {
+    foreach ($sourceItem in @('main.py', 'multicam', 'tests', 'pytest.ini', 'assets', '.github', 'docs', 'scripts', 'requirements.txt', 'requirements-dev.txt', 'build.ps1', 'launch.cmd', '.gitignore', 'LICENSE', 'README.md', 'THIRD_PARTY.md', 'LICENSES', 'CHANGELOG.md', 'CONTRIBUTING.md')) {
         $sourcePath = Join-Path $projectRoot $sourceItem
         if (Test-Path -LiteralPath $sourcePath) {
             Copy-Item -LiteralPath $sourcePath -Destination $sourceDir -Recurse -Force

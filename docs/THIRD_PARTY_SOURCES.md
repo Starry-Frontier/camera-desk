@@ -1,4 +1,4 @@
-# Corresponding sources for Camera Desk v1.1.1
+# Corresponding sources for Camera Desk Windows releases
 
 This attachment accompanies Camera Desk's Windows binary release. It contains unmodified upstream source archives and their build inputs for the LGPL libraries distributed with the program. Application source is available separately in `CameraDesk-Source.zip` and in the portable package's `source` directory.
 

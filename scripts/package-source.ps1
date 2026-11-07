@@ -9,7 +9,7 @@ $buildRoot = [IO.Path]::GetFullPath((Join-Path $projectRoot 'build')) + [IO.Path
 if (-not $stagingResolved.StartsWith($buildRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Unsafe staging directory.' }
 if (Test-Path -LiteralPath $stagingResolved) { Remove-Item -LiteralPath $stagingResolved -Recurse -Force }
 New-Item -ItemType Directory -Path $staging -Force | Out-Null
-$items = @('.github', 'assets', 'docs', 'LICENSES', 'multicam', 'scripts', 'tests', '.gitignore', 'LICENSE', 'README.md', 'THIRD_PARTY.md', 'CONTRIBUTING.md', 'CHANGELOG.md', 'main.py', 'requirements.txt', 'requirements-dev.txt', 'launch.cmd', 'build.ps1')
+$items = @('.github', 'assets', 'docs', 'LICENSES', 'multicam', 'scripts', 'tests', 'pytest.ini', '.gitignore', 'LICENSE', 'README.md', 'THIRD_PARTY.md', 'CONTRIBUTING.md', 'CHANGELOG.md', 'main.py', 'requirements.txt', 'requirements-dev.txt', 'launch.cmd', 'build.ps1')
 foreach ($item in $items) {
     $source = Join-Path $projectRoot $item
     if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination $staging -Recurse -Force }

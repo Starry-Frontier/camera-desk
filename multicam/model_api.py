@@ -17,6 +17,7 @@ PROVIDERS = {
     'deepseek': ('DeepSeek', 'https://api.deepseek.com'),
     'qwen': ('Qwen（阿里云百炼）', 'https://dashscope.aliyuncs.com/compatible-mode/v1'),
     'glm': ('GLM（智谱）', 'https://open.bigmodel.cn/api/paas/v4'),
+    'kimi': ('Kimi（月之暗面）', 'https://api.moonshot.cn/v1'),
 }
 _MAX_RESPONSE_BYTES = 1024 * 1024
 _TIMEOUT_MS = 60_000
@@ -71,7 +72,13 @@ class ModelConnection:
             path = '/models/' + model + ':generateContent'
         else:
             path = '/chat/completions'
-        url.setPath(url.path(QUrl.FullyEncoded).rstrip('/') + path, QUrl.StrictMode)
+        base_path = url.path(QUrl.FullyEncoded).rstrip('/')
+        if base_path.endswith(path):
+            url.setPath(base_path, QUrl.StrictMode)
+        elif re.search(r'/(?:chat/completions|messages|models/[^/]+:generateContent)$', base_path):
+            raise ValueError('完整请求地址与所选接口协议或模型 ID 不匹配。')
+        else:
+            url.setPath(base_path + path, QUrl.StrictMode)
         return url
 
 
@@ -95,23 +102,31 @@ def _request_body(connection, prompt, encoded_image):
 
 
 def _response_text(provider, data):
+    truncated = False
     try:
         payload = json.loads(data)
         if provider in ('claude', 'gemini'):
             if provider == 'claude':
+                truncated = payload.get('stop_reason') in ('max_tokens', 'model_context_window_exceeded')
                 parts = payload['content']
             else:
-                parts = payload['candidates'][0]['content']['parts']
+                candidate = payload['candidates'][0]
+                truncated = candidate.get('finishReason') == 'MAX_TOKENS'
+                parts = candidate['content']['parts']
             result = '\n'.join(part['text'] for part in parts
                                if isinstance(part, dict) and isinstance(part.get('text'), str)
                                and part.get('type', 'text') == 'text' and not part.get('thought'))
         else:
-            message = payload['choices'][0]['message']
+            choice = payload['choices'][0]
+            truncated = choice.get('finish_reason') == 'length'
+            message = choice['message']
             result = message.get('content') or message.get('refusal')
         if isinstance(result, str) and result.strip():
-            return result.strip()
+            return result.strip(), truncated
     except (ValueError, TypeError, AttributeError, IndexError, KeyError, RecursionError):
         pass
+    if truncated:
+        raise ValueError('模型达到输出限制，没有返回可显示的回答。请缩短问题或更换模型。')
     raise ValueError('模型没有返回可显示的文本。请检查模型是否支持图片输入及所选协议。')
 
 
@@ -121,6 +136,7 @@ class ModelClient(QObject):
     enabled_changed = Signal(bool)
     busy_changed = Signal(bool)
     succeeded = Signal(str)
+    truncated = Signal(str)
     failed = Signal(str)
 
     def __init__(self, parent=None):
@@ -244,8 +260,8 @@ class ModelClient(QObject):
             self.failed.emit('无法连接模型接口，请检查地址、网络或 HTTPS 证书。')
         else:
             try:
-                result = _response_text(provider, data)
+                result, truncated = _response_text(provider, data)
             except ValueError as exc:
                 self.failed.emit(str(exc))
             else:
-                self.succeeded.emit(result)
+                (self.truncated if truncated else self.succeeded).emit(result)

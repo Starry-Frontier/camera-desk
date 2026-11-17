@@ -87,8 +87,12 @@ class BatchSaveDialog(QDialog):
 
     def update_format(self, *_):
         for key in self.custom_names:
-            if self.edits[key].text():
-                self.edits[key].setText(str(change_suffix(self.edits[key].text(), self.kind, self.format_combo.currentData())))
+            edit = self.edits[key]
+            try:
+                name = validate_filename(edit.text())
+            except ValueError:
+                continue  # Keep the user's input for correction in the save dialog.
+            edit.setText(str(change_suffix(name, self.kind, self.format_combo.currentData())))
         self.update_names()
 
     def build_targets(self):

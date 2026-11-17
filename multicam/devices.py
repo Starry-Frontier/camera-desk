@@ -110,6 +110,81 @@ def _display_name(moniker, bind_context, ole32):
             ole32.CoTaskMemFree(name)
 
 
+def _open_property_bag(moniker):
+    bag = ctypes.c_void_p()
+    iid = _GUID.parse('55272A00-42CB-11CE-8135-00AA004BB851')
+    result = _method(moniker, 9, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p,
+                     ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p))(
+                         moniker, None, None, ctypes.byref(iid), ctypes.byref(bag))
+    if result < 0:
+        _release(bag)
+        return ctypes.c_void_p()
+    return bag
+
+
+def _device_identity(moniker, bag, bind_context, ole32, oleaut32):
+    return _read_string(bag, 'DevicePath', oleaut32) or _display_name(moniker, bind_context, ole32)
+
+
+def _variant_library():
+    oleaut32 = ctypes.WinDLL('oleaut32')
+    oleaut32.VariantClear.argtypes = [ctypes.POINTER(_VARIANT)]
+    oleaut32.VariantClear.restype = ctypes.c_long
+    return oleaut32
+
+
+def _camera_bind_context(ole32):
+    ole32.CreateBindCtx.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)]
+    ole32.CreateBindCtx.restype = ctypes.c_long
+    ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
+    ole32.CoTaskMemFree.restype = None
+    bind_context = ctypes.c_void_p()
+    # Display names are a fallback only, so a bind-context error is nonfatal.
+    ole32.CreateBindCtx(0, ctypes.byref(bind_context))
+    return bind_context
+
+
+def _bind_camera_filter(ole32, enumerator, device):
+    """Bind the identified moniker from this enumeration directly to a filter."""
+    by_identity = isinstance(device, str)
+    oleaut32 = _variant_library() if by_identity else None
+    bind_context = _camera_bind_context(ole32) if by_identity else ctypes.c_void_p()
+    index = 0
+    try:
+        while True:
+            moniker, fetched = ctypes.c_void_p(), ctypes.c_uint32()
+            result = _method(enumerator, 3, ctypes.c_long, ctypes.c_uint32,
+                             ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_uint32))(
+                                 enumerator, 1, ctypes.byref(moniker), ctypes.byref(fetched))
+            try:
+                _check(result, '查找摄像头')
+                if result == 1 or not moniker:
+                    return ctypes.c_void_p()
+                if by_identity:
+                    bag = _open_property_bag(moniker)
+                    try:
+                        candidate = _device_identity(moniker, bag, bind_context, ole32, oleaut32)
+                    finally:
+                        _release(bag)
+                else:
+                    candidate = index
+                if candidate == device:
+                    filter_ = ctypes.c_void_p()
+                    iid = _GUID.parse('56A86895-0AD4-11CE-B03A-0020AF0BA770')
+                    result = _method(moniker, 8, ctypes.c_long, ctypes.c_void_p, ctypes.c_void_p,
+                                     ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p))(
+                                         moniker, None, None, ctypes.byref(iid), ctypes.byref(filter_))
+                    if result < 0:
+                        _release(filter_)
+                        _check(result, '打开所选摄像头')
+                    return filter_
+                index += 1
+            finally:
+                _release(moniker)
+    finally:
+        _release(bind_context)
+
+
 def enumerate_cameras() -> List[CameraDevice]:
     """Return devices in DirectShow index order; return [] on other platforms.
 
@@ -124,7 +199,7 @@ def enumerate_cameras() -> List[CameraDevice]:
     # WinDLL keeps raw HRESULT values so S_FALSE / RPC_E_CHANGED_MODE can be
     # handled explicitly instead of OleDLL translating them into exceptions.
     ole32 = ctypes.WinDLL("ole32")
-    oleaut32 = ctypes.WinDLL("oleaut32")
+    oleaut32 = _variant_library()
     ole32.CoInitializeEx.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     ole32.CoInitializeEx.restype = ctypes.c_long
     ole32.CoUninitialize.argtypes = []
@@ -134,17 +209,10 @@ def enumerate_cameras() -> List[CameraDevice]:
         ctypes.POINTER(_GUID), ctypes.POINTER(ctypes.c_void_p),
     ]
     ole32.CoCreateInstance.restype = ctypes.c_long
-    ole32.CreateBindCtx.argtypes = [ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)]
-    ole32.CreateBindCtx.restype = ctypes.c_long
-    ole32.CoTaskMemFree.argtypes = [ctypes.c_void_p]
-    ole32.CoTaskMemFree.restype = None
-    oleaut32.VariantClear.argtypes = [ctypes.POINTER(_VARIANT)]
-    oleaut32.VariantClear.restype = ctypes.c_long
 
     clsid_enum = _GUID.parse("62BE5D10-60EB-11D0-BD3B-00A0C911CE86")
     iid_enum = _GUID.parse("29840822-5B84-11D0-BD3B-00A0C911CE86")
     clsid_video = _GUID.parse("860BB310-5D01-11D0-BD3B-00A0C911CE86")
-    iid_property_bag = _GUID.parse("55272A00-42CB-11CE-8135-00AA004BB851")
 
     # CoInitializeEx may report an existing STA; COM is already usable then.
     # S_OK and S_FALSE both acquire a reference that must be uninitialized.
@@ -168,8 +236,7 @@ def enumerate_cameras() -> List[CameraDevice]:
         _check(result, "枚举摄像头")
         if result == 1 or not enumerator:  # S_FALSE: no capture devices
             return []
-        # Display names are a fallback only, so a bind-context error is nonfatal.
-        ole32.CreateBindCtx(0, ctypes.byref(bind_context))
+        bind_context = _camera_bind_context(ole32)
         devices = []
         while True:
             moniker = ctypes.c_void_p()
@@ -183,18 +250,12 @@ def enumerate_cameras() -> List[CameraDevice]:
                 break
             bag = ctypes.c_void_p()
             try:
-                result = _method(
-                    moniker, 9, ctypes.c_long, ctypes.c_void_p,
-                    ctypes.c_void_p, ctypes.POINTER(_GUID),
-                    ctypes.POINTER(ctypes.c_void_p),
-                )(moniker, None, None, ctypes.byref(iid_property_bag), ctypes.byref(bag))
+                bag = _open_property_bag(moniker)
                 index = len(devices)
-                name = _read_string(bag, "FriendlyName", oleaut32) if result >= 0 else ""
+                name = _read_string(bag, "FriendlyName", oleaut32)
                 if not name and bag:
                     name = _read_string(bag, "Description", oleaut32)
-                device_id = _read_string(bag, "DevicePath", oleaut32) if result >= 0 else ""
-                if not device_id:
-                    device_id = _display_name(moniker, bind_context, ole32)
+                device_id = _device_identity(moniker, bag, bind_context, ole32, oleaut32)
                 devices.append(CameraDevice(
                     index=index,
                     name=name or "摄像头 {}".format(index + 1),

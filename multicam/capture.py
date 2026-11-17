@@ -15,6 +15,7 @@ import uuid
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, replace
+from fractions import Fraction
 from pathlib import Path
 from typing import Optional, Union
 
@@ -23,6 +24,7 @@ import numpy as np
 from PySide6.QtCore import QThread, Signal
 from PySide6.QtGui import QImage
 
+from .devices import enumerate_cameras
 from .formats import enumerate_camera_modes
 from .hardware import read_camera_zoom
 from .media_formats import format_for_extension
@@ -82,11 +84,25 @@ class SaveRequest:
     overwrite: bool = False
     duration_seconds: float = 0.0
     photo_identity: str = ''
+    request_id: str = ''
 
 
 def _release_photo_target(request):
     with _PHOTO_TARGET_LOCK:
         _PHOTO_TARGETS.discard(request.photo_identity)
+
+
+def _recording_frame_rate(fps, fourcc):
+    # OpenCV chooses the simplest decimal rate within 0.001 fps. Use that
+    # same rate for frame scheduling and the container's time base.
+    for decimals in range(4):
+        rate = round(fps, decimals)
+        if abs(rate - fps) <= .001:
+            break
+    # MPEG-4 Part 2 stores the reduced time-base denominator in 16 bits.
+    if fourcc == 'mp4v' and Fraction(str(rate)).numerator > 65535:
+        rate = round(rate, 2)
+    return rate
 
 
 def apply_image_settings(frame: np.ndarray, settings: ImageSettings) -> np.ndarray:
@@ -147,15 +163,18 @@ class CameraWorker(QThread):
     status_changed = Signal(str)
     error = Signal(str)
     snapshot_saved = Signal(str)
+    snapshot_finished = Signal(str, bool, str)
     recording_changed = Signal(bool, str)
     hardware_changed = Signal(str, object, bool)
     zoom_available = Signal(dict)
     formats_available = Signal(list)
     format_changed = Signal(bool, dict, str)
 
-    def __init__(self, device_id: Union[int, str], config: Optional[CameraConfig] = None, parent=None):
+    def __init__(self, device_id: Union[int, str], config: Optional[CameraConfig] = None, parent=None,
+                 *, expected_device_id=None):
         super().__init__(parent)
         self.device_id = device_id
+        self._expected_device_id = expected_device_id
         self._config = replace(config or CameraConfig()).validated()
         self._settings = ImageSettings()
         self._commands = queue.Queue()
@@ -208,7 +227,7 @@ class CameraWorker(QThread):
         with _PHOTO_TARGET_LOCK:
             return identity in _PHOTO_TARGETS
 
-    def take_snapshot(self, path, overwrite=False):
+    def take_snapshot(self, path, overwrite=False, *, request_id=''):
         try:
             identity = path_identity(path)
         except (OSError, RuntimeError, ValueError) as exc:
@@ -223,7 +242,8 @@ class CameraWorker(QThread):
                 message = '同名照片正在保存，请稍候或使用其他文件名。'
             else:
                 _PHOTO_TARGETS.add(identity)
-                self._commands.put(("snapshot", SaveRequest(str(path), bool(overwrite), photo_identity=identity)))
+                self._commands.put(("snapshot", SaveRequest(str(path), bool(overwrite), photo_identity=identity,
+                                                            request_id=request_id)))
                 return True
         self.error.emit(message)
         return False
@@ -241,6 +261,17 @@ class CameraWorker(QThread):
         self._stop_event.set()
         self.requestInterruption()
 
+    def _device_index(self):
+        identity = self._expected_device_id
+        if identity is None:
+            return int(self.device_id)
+        if identity.startswith('dshow:index:'):
+            raise RuntimeError('Windows 未提供此摄像头的唯一标识，无法确认所选机位。')
+        matches = [device.index for device in enumerate_cameras() if device.device_id == identity]
+        if len(matches) != 1:
+            raise RuntimeError('无法确认所选摄像头，请检查连接并刷新设备列表。')
+        return matches[0]
+
     def run(self):
         self.status_changed.emit("正在连接摄像头…" if not self._demo else "正在启动演示…")
         last_preview = last_stats = 0.0
@@ -251,14 +282,17 @@ class CameraWorker(QThread):
         failures = 0
         try:
             if not self._demo:
+                device = self._expected_device_id
+                if device is None:
+                    device = int(self.device_id)
                 try:
                     with _DEVICE_CONTROL_LOCK:
-                        self._zoom = read_camera_zoom(int(self.device_id))
+                        self._zoom = read_camera_zoom(device)
                 except Exception:
                     self._zoom = {'supported': False, 'reason': '未能读取变焦范围，设备可继续预览'}
                 try:
                     with _DEVICE_CONTROL_LOCK:
-                        self._modes = enumerate_camera_modes(int(self.device_id))
+                        self._modes = enumerate_camera_modes(device)
                 except Exception as exc:
                     self.status_changed.emit('未能读取设备格式，可手动输入分辨率：%s' % exc)
                 self.formats_available.emit([asdict(mode) for mode in self._modes])
@@ -355,9 +389,11 @@ class CameraWorker(QThread):
                 job.result()
             self._photo_jobs.clear()
             if self._pending_snapshots or self._pending_record:
+                message = '摄像头已停止，尚未完成的拍照或录像请求已取消。'
                 for request in self._pending_snapshots:
                     _release_photo_target(request)
-                self.error.emit("摄像头已停止，尚未完成的拍照或录像请求已取消。")
+                    self._snapshot_outcome(request, message)
+                self.error.emit(message)
             self._pending_snapshots.clear()
             self._pending_record = None
             self._frame = None
@@ -385,8 +421,11 @@ class CameraWorker(QThread):
                 elif command == "snapshot":
                     if len(self._pending_snapshots) >= 8:
                         _release_photo_target(value)
-                        raise ValueError("拍照请求过多，请等待保存完成。")
-                    self._pending_snapshots.append(value)
+                        message = '拍照请求过多，请等待保存完成。'
+                        self._snapshot_outcome(value, message)
+                        self.error.emit(message)
+                    else:
+                        self._pending_snapshots.append(value)
                 elif command == "record":
                     if self._writer is not None or self._pending_record:
                         raise ValueError("此机位正在录像。")
@@ -397,9 +436,12 @@ class CameraWorker(QThread):
                     self._pending_record = None
                     self._finish_recording()
             except Exception as exc:
-                self.error.emit(str(exc))
                 if command == 'format':
                     self.format_changed.emit(False, asdict(self._config), str(exc))
+                    if not self._demo and self._capture is None:
+                        self._frame = None
+                        raise
+                self.error.emit(str(exc))
 
     def _apply_format(self, config: CameraConfig, initial=False):
         if self._demo:
@@ -482,7 +524,8 @@ class CameraWorker(QThread):
             if self._stop_event.is_set():
                 raise RuntimeError('已取消切换。')
             with _DEVICE_CONTROL_LOCK:
-                capture = cv2.VideoCapture(int(self.device_id), cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_ANY)
+                index = self._device_index()
+                capture = cv2.VideoCapture(index, cv2.CAP_DSHOW if os.name == 'nt' else cv2.CAP_ANY)
                 if not capture.isOpened():
                     raise RuntimeError('无法打开摄像头，请检查连接和相机权限。')
                 capture.set(cv2.CAP_PROP_FPS, config.fps)
@@ -497,6 +540,8 @@ class CameraWorker(QThread):
                     raise RuntimeError('已取消切换。')
                 ok, frame = capture.read()
                 if ok and frame is not None and frame.size:
+                    if self._expected_device_id is not None and self._device_index() != index:
+                        raise RuntimeError('摄像头顺序在打开时发生变化，正在重新确认所选设备。')
                     return capture, frame
             raise RuntimeError('设备没有返回可用画面。')
         except Exception:
@@ -613,7 +658,9 @@ class CameraWorker(QThread):
         for request in pending:
             if len(self._photo_jobs) >= 8 or not _PHOTO_SLOTS.acquire(blocking=False):
                 _release_photo_target(request)
-                self.error.emit('照片正在保存，请稍候再拍。')
+                message = '照片正在保存，请稍候再拍。'
+                self._snapshot_outcome(request, message)
+                self.error.emit(message)
                 continue
             try:
                 if frozen is None:
@@ -622,7 +669,13 @@ class CameraWorker(QThread):
             except Exception as exc:
                 _PHOTO_SLOTS.release()
                 _release_photo_target(request)
-                self.error.emit("保存照片失败：%s" % exc)
+                message = '保存照片失败：%s' % exc
+                self._snapshot_outcome(request, message)
+                self.error.emit(message)
+
+    def _snapshot_outcome(self, request, error=''):
+        if request.request_id:
+            self.snapshot_finished.emit(request.request_id, not error, error)
 
     def _save_photo_job(self, request, frame):
         temporary = None
@@ -658,6 +711,7 @@ class CameraWorker(QThread):
             self.error.emit(error)
         else:
             self.snapshot_saved.emit(str(path))
+        self._snapshot_outcome(request, error)
 
     def _begin_recording(self, request):
         path = Path(request.path)
@@ -671,28 +725,33 @@ class CameraWorker(QThread):
             height, width = self._frame.shape[:2]
             if width % 2 or height % 2:
                 raise ValueError("录像需要偶数宽高，请先选择偶数分辨率。")
-            fps = min(120.0, max(1.0, self._device_fps))
+            fps = _recording_frame_rate(min(120.0, max(1.0, self._device_fps)), spec.fourcc)
             temporary = path.with_name('.recording-%s%s' % (uuid.uuid4().hex, spec.suffix))
             writer = cv2.VideoWriter(str(temporary), cv2.VideoWriter_fourcc(*spec.fourcc), fps, (width, height))
             if not writer.isOpened():
                 raise RuntimeError('无法创建 %s。请检查保存目录与可用空间，或改用 AVI 格式。' % spec.label)
+            first_frame = self._frame.copy()
             self._writer = writer
             self._record_path, self._record_temp = path, temporary
             self._record_fps = fps
             self._record_started = time.perf_counter()
             self._record_deadline = self._record_started + request.duration_seconds if request.duration_seconds else None
             self._record_count = 0
-            self._record_last_frame = self._frame.copy()
+            self._record_last_frame = first_frame
             self._record_last_time = self._record_started
             self._record_size = (width, height)
             self._record_overwrite = request.overwrite
             self.recording_changed.emit(True, str(path))
         except Exception as exc:
-            if writer is not None:
-                writer.release()
-            if temporary is not None and temporary.exists():
-                temporary.unlink()
-            self.error.emit("开始录像失败：%s" % exc)
+            message = '开始录像失败：%s' % exc
+            try:
+                if writer is not None:
+                    writer.release()
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
+            except (OSError, cv2.error) as cleanup_error:
+                message += '\n清理录像临时文件失败：%s' % cleanup_error
+            self.error.emit(message)
             self.recording_changed.emit(False, "")
 
     def _check_recording_backlog(self, target):
@@ -731,6 +790,7 @@ class CameraWorker(QThread):
         if self._writer is None:
             return
         path, temporary = self._record_path, self._record_temp
+        finish_error = '' if pad else '录像写入中断。'
         try:
             if pad:
                 stop_clock = min(time.perf_counter(), self._record_deadline) if self._record_deadline is not None else time.perf_counter()
@@ -739,26 +799,24 @@ class CameraWorker(QThread):
                 target = max(1, int(math.ceil((stop_clock - self._record_started) * self._record_fps - 1e-6)))
                 self._write_recording_until(target)
         except Exception as exc:
-            self.error.emit("录像结束前补帧失败：%s" % exc)
-        finally:
+            finish_error = '录像结束前补帧失败：%s' % exc
+        try:
             self._writer.release()
+        except Exception as exc:
+            finish_error = finish_error or '关闭视频编码器失败：%s' % exc
+        finally:
             self._writer = None
             self._record_last_frame = None
             self._record_last_time = 0.0
         saved = False
         try:
+            if finish_error:
+                raise RuntimeError(finish_error)
             if not temporary.exists() or temporary.stat().st_size == 0:
                 raise RuntimeError("录像文件未成功写入磁盘。")
+            self.status_changed.emit('正在逐帧校验录像文件…')
+            self._validate_recording(temporary)
             if self._record_overwrite:
-                # Keep the previous file until the new video is finalized and
-                # can actually be decoded. Replacing is explicitly authorized.
-                validation = cv2.VideoCapture(str(temporary), cv2.CAP_FFMPEG)
-                try:
-                    ok, decoded = validation.read()
-                    if not ok or decoded is None or (decoded.shape[1], decoded.shape[0]) != self._record_size:
-                        raise RuntimeError('新录像校验失败，未替换原文件。')
-                finally:
-                    validation.release()
                 temporary.replace(path)
             else:
                 temporary.rename(path)
@@ -771,4 +829,19 @@ class CameraWorker(QThread):
         self._record_deadline = None
         self._record_size = None
         self._record_overwrite = False
+
+    def _validate_recording(self, temporary):
+        validation = cv2.VideoCapture(str(temporary), cv2.CAP_FFMPEG)
+        try:
+            count = self._record_count
+            if count < 1 or not validation.isOpened() or validation.get(cv2.CAP_PROP_FRAME_COUNT) != count:
+                raise RuntimeError('视频帧数与录像记录不符。')
+            for index in range(count):
+                ok, frame = validation.read()
+                if not ok or frame is None or (frame.shape[1], frame.shape[0]) != self._record_size:
+                    raise RuntimeError('录像第 %d / %d 帧无法按录制尺寸解码。' % (index + 1, count))
+            if validation.grab():
+                raise RuntimeError('录像解码帧数与录像记录不符。')
+        finally:
+            validation.release()
 

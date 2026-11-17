@@ -34,7 +34,7 @@ class ModelDialog(QDialog):
             self.provider.addItem(label, key)
         self.provider.setCurrentIndex(self.provider.findData(connection.provider))
         self.base_url = QLineEdit(connection.base_url)
-        self.base_url.setToolTip('填写 API 基础地址，保留版本路径，例如 /v1。软件会补全请求路径。')
+        self.base_url.setToolTip('可填写 API 基础地址或完整请求地址。填写基础地址时请保留版本路径，例如 /v1。')
         self.model = QLineEdit(connection.model)
         self.model.setMaxLength(200)
         self.model.setPlaceholderText('填写服务商提供的图像模型 ID')
@@ -93,6 +93,7 @@ class ModelDialog(QDialog):
         client.enabled_changed.connect(self._enabled_changed)
         client.busy_changed.connect(self._update_controls)
         client.succeeded.connect(self._show_result)
+        client.truncated.connect(lambda text: self._show_result(text, truncated=True))
         client.failed.connect(self.status.setText)
         self._enabled_changed(client.enabled)
 
@@ -148,8 +149,8 @@ class ModelDialog(QDialog):
         self.result.clear()
         self.status.setText('正在分析 %s 的画面…' % name)
 
-    def _show_result(self, text):
+    def _show_result(self, text, *, truncated=False):
         self.result_source.setText('结果来源：' + self._request_source)
         self.result_source.show()
         self.result.setPlainText(text)
-        self.status.setText('画面分析已完成。')
+        self.status.setText('模型达到输出限制，当前结果不完整。' if truncated else '画面分析已完成。')

@@ -68,6 +68,8 @@ CHAT_RESULT = {'choices': [{'message': {'content': '结果'}}]}
     ('deepseek', '/chat/completions', 'authorization', CHAT_RESULT),
     ('qwen', '/chat/completions', 'authorization', CHAT_RESULT),
     ('glm', '/chat/completions', 'authorization', CHAT_RESULT),
+    ('kimi', '/chat/completions', 'authorization',
+     {'choices': [{'message': {'content': '结果', 'reasoning_content': '推理过程'}}]}),
     ('claude', '/messages', 'x-api-key', {'content': [{'type': 'text', 'text': '结果'}]}),
     ('gemini', '/models/vision-test:generateContent', 'x-goog-api-key',
      {'candidates': [{'content': {'parts': [{'thought': True, 'text': '隐藏'}, {'text': '结果'}]}}]}),
@@ -116,6 +118,7 @@ def test_new_provider_presets_use_documented_addresses_and_clear_previous_key(wi
         ('deepseek', 'https://api.deepseek.com', 'deepseek-flash'),
         ('qwen', 'https://dashscope.aliyuncs.com/compatible-mode/v1', 'qwen3-vl-plus'),
         ('glm', 'https://open.bigmodel.cn/api/paas/v4', 'glm-4.6v'),
+        ('kimi', 'https://api.moonshot.cn/v1', 'kimi-k3'),
     ):
         dialog.api_key.setText('previous-service-key')
         index = dialog.provider.findData(provider)
@@ -179,6 +182,54 @@ def test_remote_plain_http_and_credentials_in_url_are_rejected():
                  'https://example.test/v1?key=secret'):
         with pytest.raises(ValueError):
             ModelConnection('openai', base, 'vision-test').request_url()
+
+
+@pytest.mark.parametrize('provider, path', [('grok', '/chat/completions'), ('claude', '/messages'),
+                                          ('gemini', '/models/vision-test:generateContent')])
+def test_full_model_endpoint_is_used_without_appending_path(provider, path):
+    endpoint = 'https://example.test/v1' + path
+    assert ModelConnection(provider, endpoint, 'vision-test').request_url().toString() == endpoint
+    assert ModelConnection(provider, endpoint + '/', 'vision-test').request_url().toString() == endpoint
+    if provider == 'gemini':
+        with pytest.raises(ValueError, match='不匹配'):
+            ModelConnection(provider, endpoint, 'another-model').request_url()
+
+
+@pytest.mark.parametrize('provider, payload', [
+    ('kimi', {'choices': [{'message': {'content': '部分结果'}, 'finish_reason': 'length'}]}),
+    ('claude', {'content': [{'type': 'text', 'text': '部分结果'}], 'stop_reason': 'max_tokens'}),
+    ('gemini', {'candidates': [{'content': {'parts': [{'text': '部分结果'}]}, 'finishReason': 'MAX_TOKENS'}]}),
+])
+def test_truncated_model_result_is_displayed_with_incomplete_status(app, window, api_server, provider, payload):
+    base, _, responses, _ = api_server
+    window.show_model_dialog()
+    dialog = window.model_dialog
+    dialog.provider.setCurrentIndex(dialog.provider.findData(provider))
+    dialog.base_url.setText(base)
+    dialog.model.setText('vision-test')
+    dialog.api_key.setText('test-key')
+    dialog.enabled.click()
+    responses.put((200, {}, payload, False))
+    dialog.send.click()
+    wait_for(app, lambda: dialog.result.toPlainText() == '部分结果')
+    assert '不完整' in dialog.status.text()
+
+
+def test_shared_settings_preserve_model_connection_and_switch_from_other_window(app, window):
+    other = AuditWindow(window.data_dir)
+    connection = ModelConnection('kimi', 'https://api.moonshot.cn/v1', 'kimi-k3')
+    try:
+        assert window._remember_model_connection(connection)
+        other.model_client.set_enabled(True)
+        other.close()
+        wait_for(app, lambda: not other.close_timer.isActive())
+        assert window._save_prefs()
+        stored = json.loads((window.data_dir / 'settings.json').read_text(encoding='utf-8'))
+        assert ModelConnection.from_preferences(stored['model_api']) == connection
+        assert stored['model_api']['enabled'] is True
+    finally:
+        other.close()
+        wait_for(app, lambda: not other.close_timer.isActive())
 
 
 def test_model_dialog_uses_selected_camera_and_remembers_only_connection(app, window, api_server):

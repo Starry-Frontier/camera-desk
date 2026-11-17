@@ -5,12 +5,13 @@ import logging
 import math
 import re
 import time
+from copy import deepcopy
 from dataclasses import asdict, replace
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Optional
 
-from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QUrl, QPoint, QEvent
+from PySide6.QtCore import Qt, QThread, Signal, QTimer, QSize, QUrl, QPoint, QEvent, QLockFile
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
     QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFileDialog, QFormLayout,
@@ -25,11 +26,12 @@ from . import __version__
 from .save_dialog import BatchSaveDialog
 from .saving import SaveTarget, media_path, path_identity, validate_targets
 from .media_formats import change_suffix, format_for_extension, format_for_filter, formats_for
-from .widgets import SelectionComboBox as QComboBox, NumberBox as QSpinBox, DurationEdit
+from .widgets import SelectionComboBox as QComboBox, NumberBox as QSpinBox, DecimalBox, DurationEdit
 from .timer_dialog import TimerDialog, PhotoIntervalDialog
 from .localization import install_chinese_buttons
 from .model_api import ModelClient, ModelConnection
 from .model_dialog import ModelDialog
+from .control import LocalControl
 
 
 STYLE = """
@@ -276,9 +278,12 @@ class CameraSession:
         self.pending_record = False
         self.record_action = None
         self.pending_save_path = None
+        self.last_photo = None
+        self.last_video = None
         self.removing = False
         self.last_error = ''
         self.format_pending = False
+        self.format_edited_while_pending = False
         self.draft = CameraConfig(**asdict(config))
         self.modes = []
         self.zoom_caps = {'supported': False}
@@ -299,6 +304,7 @@ class MainWindow(QMainWindow):
         if isinstance(model_prefs, dict):
             self.model_client.set_enabled(model_prefs.get('enabled') is True)
         self.model_dialog = None
+        self.local_control = LocalControl(self)
         self.media_formats = {}
         self.media_format_combos = {}
         for kind, default in [('photo', '.png'), ('video', '.avi')]:
@@ -336,6 +342,8 @@ class MainWindow(QMainWindow):
         self.setMinimumSize(1060, 720)
         self.setStyleSheet(STYLE)
         self._build()
+        self._collect_prefs()
+        self._saved_prefs = deepcopy(self.prefs)
         if output_unavailable:
             self.notify('原保存位置不可用，已切换到软件数据目录下的 captures 文件夹。')
         self.close_timer = QTimer(self)
@@ -417,6 +425,10 @@ class MainWindow(QMainWindow):
         sidebar.addWidget(self.refresh_btn)
         self.device_hint = label('正在查找设备…', 'muted', True)
         sidebar.addWidget(self.device_hint)
+        self.control_enabled = QCheckBox('允许本机 AI 和脚本控制')
+        self.control_enabled.setToolTip('每个 Camera Desk 实例同时只允许一个本机 AI 或脚本获取预览、拍照和控制录像。关闭开关即可收回控制权。')
+        self.control_enabled.toggled.connect(self.set_local_control)
+        sidebar.addWidget(self.control_enabled)
         sidebar.addSpacing(8)
         divider = QFrame()
         divider.setObjectName('divider')
@@ -531,10 +543,13 @@ class MainWindow(QMainWindow):
         control.addWidget(self.native_only)
         fr = QHBoxLayout()
         fr.addWidget(label('目标帧率'))
-        self.fps = QSpinBox()
+        self.fps = DecimalBox()
+        self.fps.setDecimals(3)
         self.fps.setRange(1, 120)
+        self._fps_on_selection = (None, None)
         self.fps.setSuffix(' fps')
         self.fps.valueChanged.connect(self.format_draft_changed)
+        self.fps.lineEdit().textEdited.connect(self.format_draft_changed)
         fr.addWidget(self.fps, 1)
         control.addLayout(fr)
         self.apply_btn = button('应用采集格式', self.apply_format)
@@ -650,9 +665,13 @@ class MainWindow(QMainWindow):
             logging.warning('%s: invalid saved settings; using defaults: %s', device.name, exc)
         self.sequence += 1
         tile = CameraTile(self.sequence, device.name)
-        worker = CameraWorker(key if demo else device.index, config, self)
+        worker = CameraWorker(key if demo else device.index, config, self, expected_device_id=None if demo else key)
         session = CameraSession(key, device, worker, tile, config, image, self.sequence)
         self.sessions[key] = session
+        if not restored_defaults:
+            baseline = self._saved_prefs.setdefault('cameras', {})
+            if key not in baseline or self.prefs.get('cameras', {}).get(key) == baseline[key]:
+                baseline[key] = {'config': asdict(config), 'image': asdict(image)}
         self.camera_selector.blockSignals(True)
         self.camera_selector.addItem('%02d · %s' % (self.sequence, device.name), key)
         self.camera_selector.blockSignals(False)
@@ -675,7 +694,8 @@ class MainWindow(QMainWindow):
         worker.hardware_changed.connect(guarded(lambda name, value, ok: self.hardware_feedback(key, name, value, ok)))
         worker.error.connect(guarded(lambda message: self.camera_error(key, message)))
         worker.status_changed.connect(guarded(lambda message: self.camera_status(key, message)))
-        worker.snapshot_saved.connect(guarded(lambda path: self.notify('照片已保存：' + path)))
+        worker.snapshot_saved.connect(guarded(lambda path: self.snapshot_saved(key, path)))
+        worker.snapshot_finished.connect(self.local_control.snapshot_finished, Qt.QueuedConnection)
         worker.recording_changed.connect(guarded(lambda recording, path: self.recording_changed(key, recording, path)))
         worker.finished.connect(guarded(lambda: self.worker_finished(key)))
         worker.update_image(image)
@@ -742,12 +762,13 @@ class MainWindow(QMainWindow):
             self.notify('请先添加机位，再设置定时拍摄。')
             return
         dialog = TimerDialog(list(self.sessions.values()), key, self.output_dir, dict(self.media_formats), self)
-        if dialog.exec() != QDialog.Accepted:
-            return
         try:
-            self.create_capture_plan(**dialog.plan)
-        except ValueError as exc:
+            if dialog.exec() == QDialog.Accepted:
+                self.create_capture_plan(**dialog.plan)
+        except (ValueError, OSError, RuntimeError) as exc:
             QMessageBox.warning(self, '无法创建拍摄任务', str(exc))
+        finally:
+            dialog.deleteLater()
 
     def timer_for_camera(self, key):
         s = self.sessions.get(key)
@@ -768,12 +789,13 @@ class MainWindow(QMainWindow):
             self.notify('暂无可调整的拍照任务，请先创建间隔拍照任务。')
             return
         dialog = PhotoIntervalDialog(sessions, key, self)
-        if dialog.exec() != QDialog.Accepted:
-            return
         try:
-            self.set_photo_interval(**dialog.plan)
+            if dialog.exec() == QDialog.Accepted:
+                self.set_photo_interval(**dialog.plan)
         except ValueError as exc:
             QMessageBox.warning(self, '无法调整拍照间隔', str(exc))
+        finally:
+            dialog.deleteLater()
 
     def set_photo_interval(self, keys, interval):
         keys = list(dict.fromkeys(keys))
@@ -840,9 +862,12 @@ class MainWindow(QMainWindow):
                 if now >= plan['end'] or not available:
                     s.photo_plan = None
                 elif not s.format_pending and now >= plan['next']:
-                    target = self._automatic_targets([s], 'photo', directory=plan['directory'], suffix=plan['suffix'])[0]
-                    s.worker.take_snapshot(target.path)
                     plan['next'] += max(1, math.floor((now - plan['next']) / plan['interval']) + 1) * plan['interval']
+                    try:
+                        target, = self._automatic_targets([s], 'photo', directory=plan['directory'], suffix=plan['suffix'])
+                        s.worker.take_snapshot(target.path)
+                    except (OSError, ValueError, RuntimeError) as exc:
+                        self.camera_error(s.key, '无法准备定时拍照的保存位置：%s' % exc)
             if s.schedule or s.photo_plan:
                 self.stats_arrived(s.key, s.stats)
         scheduled = sum(s.schedule is not None for s in self.sessions.values())
@@ -882,6 +907,10 @@ class MainWindow(QMainWindow):
         if s and not (s.last_error and message in ('连接异常', '已停止')):
             self.notify('%s：%s' % (s.device.name, message))
 
+    def snapshot_saved(self, key, path):
+        self.sessions[key].last_photo = path
+        self.notify('照片已保存：' + path)
+
     def recording_changed(self, key, recording, path):
         s = self.sessions.get(key)
         if not s:
@@ -894,6 +923,7 @@ class MainWindow(QMainWindow):
             s.record_action = None
         s.pending_save_path = path if recording else None
         if not recording and path:
+            s.last_video = path
             self.notify((s.last_error + '；已保存录像：' if s.last_error else '视频已保存：') + path)
         elif recording and path:
             self.notify(s.device.name + ' 正在录制：' + path)
@@ -912,6 +942,7 @@ class MainWindow(QMainWindow):
         s.record_action = None
         s.pending_save_path = None
         s.format_pending = False
+        s.format_edited_while_pending = False
         s.tile.photo_btn.setEnabled(False)
         s.tile.rec_btn.setEnabled(False)
         if s.removing:
@@ -1000,7 +1031,8 @@ class MainWindow(QMainWindow):
             self.camera_selector.blockSignals(False)
             self.selected_label.setText(s.device.name)
             self.fill_resolution_options(s)
-            self.fps.setValue(int(s.draft.fps))
+            self.fps.setValue(s.draft.fps)
+            self._fps_on_selection = (self.fps.value(), s.draft.fps)
             self.native_only.setChecked(s.draft.native_only)
             self.apply_btn.setEnabled(s.ready and not s.recording and not s.pending_record and not s.format_pending)
             self.apply_btn.setText('正在切换…' if s.format_pending else '应用到此机位')
@@ -1044,12 +1076,18 @@ class MainWindow(QMainWindow):
         match = re.fullmatch(r'\s*(\d+)\s*[×xX*]\s*(\d+)\s*', self.resolution.currentText())
         if not match:
             raise ValueError('请按“宽 × 高”输入分辨率，例如 1280 × 960。')
-        return CameraConfig(int(match[1]), int(match[2]), self.fps.value(), self.native_only.isChecked()).validated()
+        fps = self.fps.value()
+        displayed, original = self._fps_on_selection
+        if fps == displayed:
+            fps = original
+        return CameraConfig(int(match[1]), int(match[2]), fps, self.native_only.isChecked()).validated()
 
     def format_draft_changed(self, *_):
         s = self.sessions.get(self.selected)
         if self.loading or not s:
             return
+        if s.format_pending:
+            s.format_edited_while_pending = True
         try:
             s.draft = self._read_format()
         except ValueError:
@@ -1069,15 +1107,17 @@ class MainWindow(QMainWindow):
         if not s:
             return
         was_pending = s.format_pending
+        preserve_draft = was_pending and s.format_edited_while_pending
         s.format_pending = False
+        s.format_edited_while_pending = False
         # The format acknowledgement precedes the first preview in that format.
         # Clear the previous preview so analysis cannot use it in the meantime.
         s.tile.view.message = '正在等待当前采集格式的画面…'
         s.tile.view.set_image(QImage())
         previous = s.config
         s.config = CameraConfig(**config)
-        # On failure restore the confirmed format, not an unaccepted request.
-        if was_pending or not ok or asdict(s.draft) == asdict(previous):
+        # A newer edit belongs to the next request, even if this one failed.
+        if not preserve_draft and (was_pending or not ok or s.draft == previous):
             s.draft = CameraConfig(**config)
         if ok:
             s.last_error = ''
@@ -1086,7 +1126,10 @@ class MainWindow(QMainWindow):
         elif message:
             self.notify(s.device.name + '：' + message)
         if self.selected == key:
-            self.select_session(key)
+            if preserve_draft:
+                self.apply_btn.setText('应用到此机位')
+            else:
+                self.select_session(key)
         self._update_actions()
 
     def slider_changed(self, name, value, target):
@@ -1111,21 +1154,29 @@ class MainWindow(QMainWindow):
 
     def apply_format(self):
         s = self.sessions.get(self.selected)
-        if not s or not s.ready or s.recording or s.pending_record or s.format_pending:
+        if not s or not self._can_save(s) or s.recording or s.pending_record:
             return
         try:
             requested = self._read_format()
         except ValueError as exc:
             self.notify(str(exc))
             return
+        self._request_format(s, requested)
+
+    def _request_format(self, s, requested):
+        if not self._can_save(s) or s.recording or s.pending_record:
+            return False
         s.draft = requested
+        s.format_edited_while_pending = False
         s.format_pending = True
-        self.apply_btn.setEnabled(False)
-        self.apply_btn.setText('正在切换…')
+        if s.key == self.selected:
+            self.apply_btn.setEnabled(False)
+            self.apply_btn.setText('正在切换…')
         s.tile.info.setText('正在切换采集格式…')
         s.worker.set_format(requested.width, requested.height, requested.fps, requested.native_only)
         self.notify('正在为 %s 切换至 %d × %d，其他机位继续运行。' % (s.device.name, requested.width, requested.height))
         self._update_actions()
+        return True
 
     def _suggested_path(self, s, kind, stamp=None, directory=None, suffix=None):
         stamp = stamp or datetime.now().strftime('%Y%m%d_%H%M%S_%f')
@@ -1186,9 +1237,9 @@ class MainWindow(QMainWindow):
         dialog = BatchSaveDialog(sessions, self.output_dir, kind, self, default_format=self.media_formats[kind])
         if kind == 'video' and any(s.recording or s.pending_record for s in self.sessions.values()):
             dialog.setWindowTitle('开始其余 %d 个机位录像 · 现有录像继续' % len(sessions))
-        if dialog.exec() != QDialog.Accepted:
-            return None
         try:
+            if dialog.exec() != QDialog.Accepted:
+                return None
             validate_targets(dialog.targets, shared_directory=dialog.directory.text().strip())
             targets = self._confirm_save_targets(dialog.targets)
             if targets:
@@ -1197,6 +1248,8 @@ class MainWindow(QMainWindow):
         except (ValueError, OSError) as exc:
             QMessageBox.warning(self, '请检查保存位置', str(exc))
             return None
+        finally:
+            dialog.deleteLater()
 
     def _automatic_targets(self, sessions, kind, directory=None, suffix=None):
         directory = Path(self.output_dir if directory is None else directory).resolve()
@@ -1290,13 +1343,14 @@ class MainWindow(QMainWindow):
 
     def _stop_record_one(self, s):
         if self.sessions.get(s.key) is not s or s.removing or s.record_action == 'stop':
-            return
+            return False
         if not s.recording and s.record_action != 'start':
-            return
+            return False
         s.pending_record = True
         s.record_action = 'stop'
         s.worker.stop_recording()
         self._update_actions()
+        return True
 
     def toggle_record(self, key, *, prompt=True):
         s = self.sessions.get(key)
@@ -1418,7 +1472,25 @@ class MainWindow(QMainWindow):
 
     def _remember_model_connection(self, connection):
         self.model_connection = connection
-        return self._save_prefs()
+        return self._save_prefs(save_model_connection=True)
+
+    def set_local_control(self, enabled):
+        if enabled and not self.closing:
+            try:
+                port = self.local_control.start()
+            except (OSError, RuntimeError) as exc:
+                self.notify('本机控制启动失败：' + str(exc))
+                enabled = False
+            else:
+                self.notify('本机控制已开启，端口 %d。' % port)
+        else:
+            enabled = False
+            self.local_control.stop()
+            self.notify('本机控制已关闭。')
+        if self.control_enabled.isChecked() != enabled:
+            self.control_enabled.blockSignals(True)
+            self.control_enabled.setChecked(enabled)
+            self.control_enabled.blockSignals(False)
 
     def hardware_dialog(self):
         s = self.sessions.get(self.selected)
@@ -1446,7 +1518,10 @@ class MainWindow(QMainWindow):
         close = QDialogButtonBox(QDialogButtonBox.Close)
         close.rejected.connect(dialog.reject)
         layout.addWidget(close)
-        dialog.exec()
+        try:
+            dialog.exec()
+        finally:
+            dialog.deleteLater()
 
     def choose_output(self):
         path = QFileDialog.getExistingDirectory(self, '选择照片与视频保存目录', str(self.output_dir))
@@ -1484,7 +1559,7 @@ class MainWindow(QMainWindow):
         cameras = self.prefs.setdefault('cameras', {})
         cameras[s.key] = {'config': asdict(s.config), 'image': asdict(s.image)}
 
-    def _save_prefs(self):
+    def _collect_prefs(self):
         for s in self.sessions.values():
             self._remember(s)
         # Default output follows the portable data folder on any computer.
@@ -1494,14 +1569,62 @@ class MainWindow(QMainWindow):
         self.prefs['duration_enabled'] = self.duration_enabled.isChecked()
         self.prefs['record_duration'] = self.record_duration.value()
         self.prefs['model_api'] = dict(asdict(self.model_connection), enabled=self.model_client.enabled)
+
+    @staticmethod
+    def _merge_camera_settings(current, previous, stored):
+        if not all(isinstance(settings, dict) for settings in (current, previous, stored)):
+            return current if stored is None or current != previous else stored
+        for group, value in current.items():
+            old = previous.get(group)
+            existing = stored.get(group)
+            if group == 'image' and all(isinstance(fields, dict) for fields in (value, old, existing)):
+                existing.update({name: item for name, item in value.items()
+                                 if name not in existing or item != old.get(name)})
+            elif group not in stored or value != old:
+                # Width, height, FPS and native mode form a single format.
+                stored[group] = value
+        return stored
+
+    def _save_prefs(self, *, save_model_connection=False):
+        self._collect_prefs()
+        lock = QLockFile(str(self.data_dir / 'settings.lock'))
+        lock.setStaleLockTime(0)
+        if not lock.tryLock(1000):
+            self.notify('设置暂未保存：无法锁定设置文件，请稍后重试。')
+            return False
         try:
+            # Each running window can have an older copy of the settings.
+            # Merge its edits against its own baseline under the file lock.
+            stored = self._load_prefs()
+            for key, value in self.prefs.items():
+                if key not in ('cameras', 'model_api') and (key not in stored or value != self._saved_prefs.get(key)):
+                    stored[key] = value
+            cameras = stored.setdefault('cameras', {})
+            previous_cameras = self._saved_prefs.get('cameras', {})
+            for key, value in self.prefs.get('cameras', {}).items():
+                cameras[key] = self._merge_camera_settings(value, previous_cameras.get(key), cameras.get(key))
+            model = stored.get('model_api')
+            if not isinstance(model, dict):
+                model = {}
+            current_model = self.prefs['model_api']
+            previous_model = self._saved_prefs['model_api']
+            connection_keys = ('provider', 'base_url', 'model')
+            if save_model_connection or any(key not in model or current_model[key] != previous_model[key]
+                                            for key in connection_keys):
+                model.update({key: current_model[key] for key in connection_keys})
+            if 'enabled' not in model or current_model['enabled'] != previous_model['enabled']:
+                model['enabled'] = current_model['enabled']
+            stored['model_api'] = model
             target = self.data_dir / 'settings.json'
             temporary = target.with_suffix('.tmp')
-            temporary.write_text(json.dumps(self.prefs, ensure_ascii=False, indent=2), encoding='utf-8')
+            temporary.write_text(json.dumps(stored, ensure_ascii=False, indent=2), encoding='utf-8')
             temporary.replace(target)
         except OSError as exc:
             self.notify('设置暂未保存：' + str(exc))
             return False
+        finally:
+            lock.unlock()
+        self._saved_prefs = deepcopy(self.prefs)
         return True
 
     def closeEvent(self, event):
@@ -1513,6 +1636,7 @@ class MainWindow(QMainWindow):
             return
         self._save_prefs()
         self.closing = True
+        self.local_control.stop()
         if self.model_dialog is not None:
             self.model_dialog.close()
         self.model_client.set_enabled(False)

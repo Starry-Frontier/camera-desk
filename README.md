@@ -85,13 +85,15 @@
 
 软件优先尝试原生采集尺寸。设备只返回固定尺寸时，会按所选输出宽高缩放，并标明“软件缩放”；预览、照片和视频采用相同输出尺寸。缩放不会增加相机的原始细节，也不会降低 USB 端的原始采集带宽。
 
+目标帧率支持小数。当 MP4 编码器无法表示某个帧率时，软件会以接近的帧率写入视频，采集设置仍按所选值发送给设备。
+
 如只接受真实原生采集，请勾选“仅相机原生分辨率（禁止缩放）”。切换时若设备不支持，软件会尝试恢复此前的采集设置。运行中若设备返回其他尺寸，软件会停止该机位并提示。录制中的机位需先停止录制再切换分辨率，其他机位可继续运行。
 
 ## 模型分析（v1.3.0 起）
 
 1. 选中有预览画面的机位，在顶部打开“模型分析…”，勾选“启用模型 API”。接口默认关闭。
-2. 选择接口协议，填写 API 基础地址、支持图像输入的模型 ID 和所需密钥。基础地址保留版本路径，软件会补全请求路径。点击“保存连接设置”可记住协议、地址和模型 ID。密钥只保留在本次运行中，修改地址或切换协议会清空密钥。
-3. 输入问题，点击“发送当前画面并分析”。切换分辨率后需等新预览出现。软件把当前机位的一帧预览图和问题发给所填地址，返回结果会注明所用机位。关闭总开关会拦截新请求并取消本地等待。
+2. 选择接口协议，填写 API 地址、支持图像输入的模型 ID 和所需密钥。可填完整请求地址，也可填带版本路径的基础地址，由软件补全请求路径。点击“保存连接设置”可记住协议、地址和模型 ID。密钥只保留在本次运行中，修改地址或切换协议会清空密钥。
+3. 输入问题，点击“发送当前画面并分析”。切换分辨率后需等新预览出现。软件把当前机位的一帧预览图和问题发给所填地址，返回结果会注明所用机位。服务因达到输出限制而结束时，界面会标记结果不完整。关闭总开关会拦截新请求并取消本地等待。
 
 | 协议 | 基础地址示例 | 用途 |
 |---|---|---|
@@ -102,8 +104,58 @@
 | [DeepSeek](https://api-docs.deepseek.com/guides/vision/) | `https://api.deepseek.com` | 视觉模型 ID 示例为 `deepseek-flash`。 |
 | [Qwen（阿里云百炼）](https://www.alibabacloud.com/help/zh/model-studio/vision) | `https://dashscope.aliyuncs.com/compatible-mode/v1` | 默认使用北京地域地址。可改填与 API 密钥匹配的[地域或业务空间地址](https://help.aliyun.com/zh/model-studio/base-url)。 |
 | [GLM（智谱）](https://docs.bigmodel.cn/cn/guide/models/vlm/glm-4.6v) | `https://open.bigmodel.cn/api/paas/v4` | 视觉模型 ID 示例为 `glm-4.6v`。 |
+| [Kimi（月之暗面）](https://platform.kimi.com/docs/guide/use-kimi-vision-model) | `https://api.moonshot.cn/v1` | 使用 Kimi 开放平台 API 密钥，模型 ID 可填写 `kimi-k3`。 |
 
 远程接口使用 HTTPS。本机回环接口可使用 HTTP，例如 `http://127.0.0.1:11434/v1`。一次分析发送一帧，最长边限制为 960 像素。
+
+## 让其他 AI 或脚本控制 Camera Desk
+
+从 v1.4.0 起，启动 EXE 或从源码运行后，可在左侧勾选 **允许本机 AI 和脚本控制**。也可在启动时传入 `--enable-control`。开关默认关闭，每次开启都会生成新的连接凭据。控制服务监听 `127.0.0.1`，启用期间可读取软件数据目录的本机工具可使用其中的会话文件授权控制。请勿将 `control-<PID>.json` 分享给其他人。
+
+每个 Camera Desk 实例同时只允许一个 AI 或脚本客户端查询机位、取帧和发出操作指令。当前客户端主动释放控制权，或连续 120 秒没有成功操作后，其他客户端可以接管。关闭界面开关立即收回控制权。
+
+下面是在项目目录操作演示机位的命令。使用发行版 EXE 时，可从源码包或便携包的 `source` 目录取得 `scripts/camera-control.py`。CLI 和 MCP 桥接脚本使用 Python 标准库，可用 Python 3.8 或更新版本运行，无需为脚本安装摄像软件依赖。使用实体机位时，先运行 `status`，再传入相应的 `--camera`。启动与控制命令应使用同一个数据目录。单文件版的默认数据目录为 EXE 同级的 `data`。
+
+```powershell
+.\.venv\Scripts\python.exe main.py --demo --enable-control
+```
+
+在另一个 PowerShell 窗口执行：
+
+```powershell
+.\.venv\Scripts\python.exe scripts/camera-control.py status
+.\.venv\Scripts\python.exe scripts/camera-control.py preview --camera demo:0 --out preview.jpg
+.\.venv\Scripts\python.exe scripts/camera-control.py snapshot --camera demo:0
+.\.venv\Scripts\python.exe scripts/camera-control.py start_recording --camera demo:0 --duration 10
+.\.venv\Scripts\python.exe scripts/camera-control.py stop_recording --camera demo:0
+```
+
+每条命令行指令单独申请控制权，执行后释放。Python 脚本需要连续操作时，可通过 `multicam.control_client.ControlSession` 在同一个 `with` 块中调用多个命令。`--pid` 可用于指定同时运行的某个实例。拍照和录像命令会立即返回预期路径。拍照还会返回 `request_id`，可用 `photo_status --request-id <request_id>` 查询该次拍照是否提交、已保存或失败。录像可用 `status` 查询 `record_action`、`last_video` 和 `last_error`。录像时长省略或填 `0` 表示持续到手动停止。
+
+### MCP 客户端
+
+在支持本机 stdio MCP 的客户端中添加以下服务器配置，并将路径改为实际安装位置。Camera Desk 需要保持运行并开启本机控制。取帧工具会直接向客户端返回 JPEG 图像块。桥接程序支持 2024-11-05 至 2025-11-25 的握手版本。 [MCP stdio 规范](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)
+
+MCP 客户端在首次调用 Camera Desk 操作工具时申请控制权，之后连续调用时沿用。多个 AI 接入时，每个 AI 使用独立的 MCP 连接。调用 `camera_desk_release_control` 或正常断开 MCP 连接即可交还控制权。桥接程序异常退出时，控制权随空闲超时自动失效。MCP 和 Python 控制会话固定连接到首次确认的实例。目标实例退出或需要切换时，请建立新会话并确认目标。MCP 中用 `camera_desk_photo_status` 查询拍照请求。
+
+```json
+{
+  "mcpServers": {
+    "camera-desk": {
+      "command": "D:/Camera/.venv/Scripts/python.exe",
+      "args": ["D:/Camera/scripts/camera-control.py", "--data-dir", "D:/Camera/data", "mcp"]
+    }
+  }
+}
+```
+
+### 本机 HTTP 接口
+
+从数据目录中的 `control-<PID>.json` 读取 `url` 与 `token`，用 `Authorization: Bearer <token>` 和 `Content-Type: application/json` 发送 POST。`instance` 是运行实例的标识。重新读取凭据时可用它确认仍是同一个实例。每个客户端单独生成 32 字节随机值并编码成 43 个不带填充的 Base64URL 字符，例如 Python 的 `secrets.token_urlsafe(32)`。把该值放入 `X-CameraDesk-Controller` 请求头，先发送 `{"action":"acquire_control"}`，然后携带相同的请求头提交操作，用完发送 `{"action":"release_control"}`。
+
+`control_info` 可在申请前查询是否已占用。HTTP 409 提示控制权已被其他客户端占用时，可等待对方释放。HTTP 423 表示需要申请或重新申请控制权。操作请求格式为 `{"action":"preview","arguments":{"camera_id":"demo:0"}}`。成功响应包含 `result`，错误响应包含 `error`。`preview` 的 `image_base64` 是 JPEG 字节的 Base64 编码。
+
+操作包括 `status`、`refresh_devices`、`add_camera`、`select_camera`、`preview`、`snapshot`、`photo_status`、`start_recording`、`stop_recording` 和 `set_format`。`add_camera` 使用 `status` 中的 `device_id`，机位操作使用 `cameras` 中的 `id`。省略可选的 `camera_id` 时使用当前选中机位。`photo_status` 接受 `snapshot` 返回的 `request_id`，返回 `submitted`、`saved` 或 `failed`，以及文件路径和错误信息。软件保留最近 256 条已结束的接口拍照结果。`set_format` 需要 `width` 和 `height`，也可传入 `fps` 和 `native_only`。切换后可查询 `preview_ready`。
 
 ## 文件保存
 
@@ -113,7 +165,7 @@
 
 多路同时拍摄默认共用侧边栏设置的保存文件夹，所有机位的照片或录像直接放在该文件夹内，以机位编号或自定义文件名区分。每批只需选择一次文件夹；后续批次和重启软件后继续使用最近选择的目录。
 
-软件会记住最近使用的保存目录。同名文件会提示是否替换，只有确认后才允许覆盖。同名照片仍在写入时，请等待写入完成或使用其他文件名。已有录像会保留到新录像成功保存并通过读取校验后再替换。批量文件名不能相同，也不能与正在录制的文件冲突。
+软件会记住最近使用的保存目录。同名文件会提示是否替换，只有确认后才允许覆盖。同名照片仍在写入时，请等待写入完成或使用其他文件名。录像停止后逐帧解码校验，长录像保存可能需要更多时间。校验失败时保留原文件，并提示临时录像的位置。批量文件名不能相同，也不能与正在录制的文件冲突。
 
 左侧可选择默认图片／视频格式，单机位“另存为”和多机位保存窗口也可以选择格式；切换格式会更新文件后缀并保留自定义名称。实际保存格式以窗口中的格式选项为准，手动修改文件名时会自动调整后缀。选择会被记住，修改视频格式仅影响下一次开始的录像，正在录制的文件保持原格式。
 
@@ -156,7 +208,7 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 
 ## GitHub 开源与发行
 
-把项目根目录上传为 GitHub 仓库即可。普通提交和 PR 会运行 Windows 测试；推送与当前版本号一致的 `v1.3.0` 等标签后，发行工作流会测试、构建两种可执行版本、打包应用及第三方源码、计算校验值，并创建草稿发行版供维护者检查。
+把项目根目录上传为 GitHub 仓库即可。普通提交和 PR 会运行 Windows 测试；推送与当前版本号一致的 `v1.4.0` 等标签后，发行工作流会测试、构建两种可执行版本、打包应用及第三方源码、计算校验值，并创建草稿发行版供维护者检查。
 
 完整步骤见 [发行指南](docs/RELEASING.md)，参与开发见 [CONTRIBUTING.md](CONTRIBUTING.md)。源码与便携包中不包含拍摄内容、个人设置或开发环境。
 

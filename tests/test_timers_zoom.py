@@ -187,7 +187,9 @@ class ZoomCapture:
 
 def test_zoom_capability_per_camera_limits_and_rejected_driver_feedback(tmp_path, monkeypatch):
     caps = {'supported': True, 'minimum': 100, 'maximum': 400, 'step': 10, 'default': 100, 'current': 100}
-    monkeypatch.setattr(backend, 'read_camera_zoom', lambda index: dict(caps) if index != 1 else {'supported': False})
+    devices = [CameraDevice(index, '测试镜头%d' % index, 'fake:%d' % index) for index in range(3)]
+    monkeypatch.setattr(backend, 'enumerate_cameras', lambda: devices)
+    monkeypatch.setattr(backend, 'read_camera_zoom', lambda device: dict(caps) if device != 'fake:1' else {'supported': False})
     monkeypatch.setattr(backend, 'enumerate_camera_modes', lambda index: [])
     handles = {}
     def open_format(self, config, require_exact):
@@ -198,8 +200,8 @@ def test_zoom_capability_per_camera_limits_and_rejected_driver_feedback(tmp_path
     window = MainWindow(tmp_path)
     window.show()
     try:
-        for index in range(3):
-            window.add_camera(CameraDevice(index, '测试镜头%d' % index, 'fake:%d' % index))
+        for device in devices:
+            window.add_camera(device)
         until(app, lambda: all(s.ready for s in window.sessions.values()))
         a, unavailable, b = list(window.sessions.values())
         assert a.tile.zoom_apply.isEnabled() and b.tile.zoom_apply.isEnabled()

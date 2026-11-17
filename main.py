@@ -12,6 +12,7 @@ def main():
     parser.add_argument('--demo-count', type=int, choices=range(1, 9), default=2,
                         help='演示机位数量，配合 --demo 使用（1～8 路）')
     parser.add_argument('--data-dir', type=Path, help='设置文件与默认拍摄文件的数据目录')
+    parser.add_argument('--enable-control', action='store_true', help='为本次运行开启本机 AI 和脚本控制')
     parser.add_argument('--smoke-test', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--smoke-test-formats', action='store_true', help=argparse.SUPPRESS)
     parser.add_argument('--smoke-test-timers', action='store_true', help=argparse.SUPPRESS)
@@ -45,6 +46,8 @@ def main():
     window = MainWindow(data, demo=args.demo or args.smoke_test or args.smoke_test_formats or args.smoke_test_timers,
                         demo_count=args.demo_count)
     window.show()
+    if args.enable_control:
+        window.set_local_control(True)
     if args.smoke_test or args.smoke_test_formats or args.smoke_test_timers:
         from multicam.smoke import schedule_smoke_test
         schedule_smoke_test(window, data, formats=args.smoke_test_formats, channels=args.demo_count, timers=args.smoke_test_timers)

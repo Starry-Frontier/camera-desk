@@ -5,10 +5,10 @@ https://learn.microsoft.com/windows/win32/api/strmif/nf-strmif-iamcameracontrol-
 import ctypes as C
 import sys
 
-from .devices import _GUID, _check, _method, _release
+from .devices import _GUID, _bind_camera_filter, _check, _method, _release
 
 
-def read_camera_zoom(device_index):
+def read_camera_zoom(device):
     unavailable = {'supported': False, 'reason': '设备未报告可用的手动变焦范围'}
     if sys.platform != 'win32':
         return unavailable
@@ -32,20 +32,9 @@ def read_camera_zoom(device_index):
         _check(result, '读取变焦设备')
         if result == 1 or not enum:
             return unavailable
-        for index in range(int(device_index) + 1):
-            moniker, fetched = C.c_void_p(), C.c_uint32()
-            result = _method(enum, 3, C.c_long, C.c_uint32, C.POINTER(C.c_void_p), C.POINTER(C.c_uint32))(
-                enum, 1, C.byref(moniker), C.byref(fetched))
-            if result != 0 or not moniker:
-                return unavailable
-            try:
-                if index == int(device_index):
-                    iid_filter = _GUID.parse('56A86895-0AD4-11CE-B03A-0020AF0BA770')
-                    _check(_method(moniker, 8, C.c_long, C.c_void_p, C.c_void_p,
-                                   C.POINTER(_GUID), C.POINTER(C.c_void_p))(
-                                       moniker, None, None, C.byref(iid_filter), C.byref(filter_)), '读取变焦接口')
-            finally:
-                _release(moniker)
+        filter_ = _bind_camera_filter(ole, enum, device)
+        if not filter_:
+            return unavailable
         iid_control = _GUID.parse('C6E13370-30AC-11D0-A18C-00A0C9118956')
         result = _method(filter_, 0, C.c_long, C.POINTER(_GUID), C.POINTER(C.c_void_p))(
             filter_, C.byref(iid_control), C.byref(control))

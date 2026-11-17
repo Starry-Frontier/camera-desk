@@ -10,7 +10,7 @@ import ctypes as C
 import sys
 from dataclasses import dataclass
 
-from .devices import _GUID, _check, _method, _release
+from .devices import _GUID, _bind_camera_filter, _check, _method, _release
 
 
 @dataclass(frozen=True)
@@ -109,7 +109,7 @@ def _pin_modes(pin, ole):
         _release(config)
 
 
-def enumerate_camera_modes(device_index):
+def enumerate_camera_modes(device):
     if sys.platform != 'win32':
         return []
     ole = C.WinDLL('ole32')
@@ -134,21 +134,9 @@ def enumerate_camera_modes(device_index):
         _check(result, '读取摄像头')
         if result == 1 or not enum:
             return []
-        for index in range(int(device_index) + 1):
-            moniker, fetched = C.c_void_p(), C.c_uint32()
-            result = _method(enum, 3, C.c_long, C.c_uint32, C.POINTER(C.c_void_p), C.POINTER(C.c_uint32))(
-                enum, 1, C.byref(moniker), C.byref(fetched))
-            _check(result, '查找摄像头')
-            if result == 1 or not moniker:
-                return []
-            try:
-                if index == int(device_index):
-                    iid_filter = _GUID.parse('56A86895-0AD4-11CE-B03A-0020AF0BA770')
-                    _check(_method(moniker, 8, C.c_long, C.c_void_p, C.c_void_p,
-                                   C.POINTER(_GUID), C.POINTER(C.c_void_p))(
-                                       moniker, None, None, C.byref(iid_filter), C.byref(filter_)), '读取设备格式')
-            finally:
-                _release(moniker)
+        filter_ = _bind_camera_filter(ole, enum, device)
+        if not filter_:
+            return []
         _check(_method(filter_, 10, C.c_long, C.POINTER(C.c_void_p))(filter_, C.byref(pins)), '读取视频输出')
         modes = []
         while True:

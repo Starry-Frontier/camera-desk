@@ -111,8 +111,11 @@ def test_declining_replace_or_batch_cancel_saves_nothing(tmp_path, monkeypatch):
         assert not original_dir.exists()
         assert not any(s.recording or s.pending_record for s in window.sessions.values())
         monkeypatch.setattr(QMessageBox, 'question', lambda *args, **kwargs: QMessageBox.Yes)
+        saved = []
+        window.sessions['demo:0'].worker.snapshot_saved.connect(saved.append)
         window.snapshot_one('demo:0')
-        until(app, lambda: target.read_bytes() != b'keep original photo')
+        # Polling the existing file can block its replacement on Windows.
+        until(app, lambda: str(target) in saved)
         replaced = cv2.imdecode(np.fromfile(str(target), np.uint8), cv2.IMREAD_COLOR)
         assert replaced is not None and replaced.shape[:2] == (720, 1280)
     finally:
